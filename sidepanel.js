@@ -256,11 +256,12 @@ async function sendMessage() {
   }
 
   sendBtn.disabled = true;
-  sendBtn.textContent = "发送中...";
+  const total = selectedIndices.length;
+  let completed = 0;
+  sendBtn.textContent = `发送中 (0/${total})`;
 
-  const results = [];
-
-  for (const index of selectedIndices) {
+  // 并行处理所有选中的目标：一次性打开/发送，而不是逐个等待
+  const tasks = selectedIndices.map(async (index) => {
     const p = platformList[index];
     const isOpen = !!p.tab;
     const mode = isOpen ? getTabMode(p.tab.id) : "open";
@@ -299,22 +300,29 @@ async function sendMessage() {
 
       console.log(`[Multi Chat] 响应:`, response);
 
-      results.push({
+      return {
         platform: p.name,
         mode: mode,
         success: response && response.success,
         error: response?.error || ((!response || !response.success) ? "未收到成功响应" : null)
-      });
+      };
     } catch (err) {
       console.error(`[Multi Chat] 发送异常:`, err);
-      results.push({
+      return {
         platform: p.name,
         mode: mode,
         success: false,
         error: err.message || "通信失败"
-      });
+      };
+    } finally {
+      // 每完成一个任务，更新进度显示
+      completed++;
+      sendBtn.textContent = `发送中 (${completed}/${total})`;
     }
-  }
+  });
+
+  // 等待所有任务完成（并行执行）
+  const results = await Promise.all(tasks);
 
   sendBtn.disabled = false;
   sendBtn.textContent = "发送";
@@ -340,7 +348,6 @@ async function sendMessage() {
 
   // 显示结果
   const successCount = results.filter(r => r.success).length;
-  const total = results.length;
 
   if (successCount === total) {
     showToast(`全部发送成功 (${total}/${total})`, "success");

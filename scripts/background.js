@@ -113,13 +113,13 @@ async function handleOpenAndSend(message, platform, openUrl) {
   await waitForTabLoaded(tabId, 20000);
   console.log(`[Multi Chat BG] New tab ${tabId} loaded`);
 
-  // 额外等待，让 SPA 渲染 + 可能的登录态检查完成
-  await wait(2500);
+  // 短暂等待让 SPA 开始渲染（后续用轮询兜底，不必等太久）
+  await wait(800);
 
   // 第三步：注入 content script
   await injectContentScript(tabId);
 
-  // 第四步：等待输入框就绪（新开页面给更长超时，可能需要登录）
+  // 第四步：等待输入框就绪（轮询，一就绪立即继续；新开页面给更长超时，可能需要登录）
   console.log(`[Multi Chat BG] Waiting for input ready on new tab ${tabId}`);
   try {
     await waitForInputReady(tabId, platform, 15000);
@@ -173,7 +173,7 @@ function waitForTabLoaded(tabId, timeout) {
 // 等待输入框就绪（通过 content script 轮询）
 async function waitForInputReady(tabId, platform, timeout) {
   const startTime = Date.now();
-  const interval = 500;
+  const interval = 300;
 
   while (Date.now() - startTime < timeout) {
     try {
