@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div class="panel">
+    <!-- 顶部标题 -->
+    <header class="header">
+      <h1>📨 Multi Chat</h1>
+      <button id="clear-history" class="btn-icon" title="清空历史">🗑️</button>
+    </header>
+
+    <!-- 消息输入区 -->
+    <div class="input-section">
+      <textarea id="message" placeholder="输入要发送的消息..." rows="3"></textarea>
+      <div class="input-actions">
+        <div class="target-info">
+          <span id="target-count">0</span> 个目标
+          <button id="refresh-tabs" class="btn-icon" title="刷新标签页">🔄</button>
+        </div>
+        <button id="send-btn" class="btn-primary">发送</button>
+      </div>
+    </div>
+
+    <!-- 目标平台选择（可折叠） -->
+    <details class="targets-section" open>
+      <summary>目标平台 <span class="hint" id="tab-hint"></span></summary>
+
+      <!-- 统一模式设置 -->
+      <div class="mode-global">
+        <label>统一设置:</label>
+        <select id="global-mode">
+          <option value="continue">继续对话</option>
+          <option value="new">新对话</option>
+        </select>
+      </div>
+
+      <div id="tab-list" class="tab-list">
+        <div class="loading">检测中...</div>
+      </div>
+      <div class="tab-actions">
+        <button id="select-all" class="btn-small">全选</button>
+        <button id="deselect-all" class="btn-small">取消全选</button>
+      </div>
+    </details>
+
+    <!-- 历史消息列表 -->
+    <div class="history-section">
+      <h2>发送历史</h2>
+      <div id="history-list" class="history-list">
+        <div class="empty">暂无发送记录</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
