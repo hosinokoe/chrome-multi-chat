@@ -12,6 +12,7 @@ const PLATFORMS = {
 
 const HISTORY_KEY = "multiChatHistory";
 const MODE_KEY = "multiChatModes";
+const THEME_KEY = "multiChatTheme";
 const MAX_HISTORY = 100;
 
 // 每个平台的展示项：已打开的带 tab 信息，未打开的 tab 为 null
@@ -19,11 +20,37 @@ let platformList = []; // [{ key, name, newChatUrl, tab: {id,title,favIconUrl} |
 let tabModes = {}; // { tabId: "new" | "continue" }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  await loadTheme();
   await loadModes();
   await detectPlatforms();
   await loadHistory();
   setupEventListeners();
 });
+
+// ============ 主题管理 ============
+
+async function loadTheme() {
+  const data = await chrome.storage.local.get(THEME_KEY);
+  const theme = data[THEME_KEY] || "light";
+  applyTheme(theme);
+}
+
+function applyTheme(theme) {
+  document.body.setAttribute("data-theme", theme);
+  const btn = document.getElementById("theme-toggle");
+  if (btn) {
+    // 亮色模式显示月亮（点击切到暗色），暗色模式显示太阳（点击切回亮色）
+    btn.textContent = theme === "dark" ? "☀️" : "🌙";
+    btn.title = theme === "dark" ? "切换到亮色" : "切换到暗色";
+  }
+}
+
+async function toggleTheme() {
+  const current = document.body.getAttribute("data-theme") || "light";
+  const next = current === "dark" ? "light" : "dark";
+  applyTheme(next);
+  await chrome.storage.local.set({ [THEME_KEY]: next });
+}
 
 // ============ 模式管理 ============
 
@@ -160,6 +187,9 @@ function updateTargetCount() {
 // ============ 事件监听 ============
 
 function setupEventListeners() {
+  // 主题切换
+  document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
+
   // 刷新平台列表
   document.getElementById("refresh-tabs").addEventListener("click", detectPlatforms);
 
