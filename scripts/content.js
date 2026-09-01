@@ -119,6 +119,9 @@ async function fillAndSend(platform, message) {
   await simulateTyping(input, message);
   await wait(400);
 
+  // 验证内容确实进入了输入框（Z.AI 等编辑器状态同步可能滞后）
+  await waitForInputFilled(input, message, 3000);
+
   // 点击发送按钮
   const sent = await clickSend(adapter, input);
   if (!sent) {
@@ -126,6 +129,26 @@ async function fillAndSend(platform, message) {
   }
 
   return true;
+}
+
+// 等待输入框内容真正填入（轮询验证，避免在内容同步前就触发发送）
+async function waitForInputFilled(input, message, timeout) {
+  const startTime = Date.now();
+  const expected = message.trim().slice(0, 20); // 只比对前 20 字符，够判断了
+
+  while (Date.now() - startTime < timeout) {
+    const current = (input.tagName === "TEXTAREA" || input.tagName === "INPUT")
+      ? input.value
+      : input.textContent;
+
+    if (current && current.trim().includes(expected)) {
+      return true;
+    }
+    await wait(150);
+  }
+  // 超时也继续（不阻断），交给 clickSend 的按钮状态判断兜底
+  console.warn("[Multi Chat] 输入框内容验证超时，继续尝试发送");
+  return false;
 }
 
 // 清空输入框
@@ -195,31 +218,27 @@ async function simulateTyping(input, message) {
 // 点击发送按钮
 async function clickSend(adapter, input) {
   // 先等一下让框架处理输入
-  await wait(300);
+  await wait(200);
 
-  const sendBtn = adapter.getSendButton();
-
-  if (sendBtn) {
-    // 检查按钮是否可用
-    const isDisabled = sendBtn.disabled ||
-                       sendBtn.getAttribute("aria-disabled") === "true" ||
-                       sendBtn.classList.contains("disabled");
-
-    if (!isDisabled) {
-      sendBtn.click();
-      return true;
+  // 轮询等待发送按钮变为可用（最多 3 秒）
+  // 内容同步到框架 state 后，禁用的发送按钮才会启用——这是"内容已就绪"最可靠的信号
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const btn = adapter.getSendButton();
+    if (btn) {
+      const isDisabled = btn.disabled ||
+                         btn.getAttribute("aria-disabled") === "true" ||
+                         btn.classList.contains("disabled");
+      if (!isDisabled) {
+        btn.click();
+        return true;
+      }
     }
-
-    // 按钮被禁用，等待一下再试
-    await wait(500);
-    const retryBtn = adapter.getSendButton();
-    if (retryBtn && !retryBtn.disabled && retryBtn.getAttribute("aria-disabled") !== "true") {
-      retryBtn.click();
-      return true;
-    }
+    await wait(150);
   }
 
-  // fallback: 尝试 Enter 键
+  // 按钮始终不可用或找不到，回退到 Enter 键
+  console.warn("[Multi Chat] 发送按钮不可用，回退到 Enter 键");
   const enterEvent = new KeyboardEvent("keydown", {
     key: "Enter",
     code: "Enter",
