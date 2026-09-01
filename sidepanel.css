@@ -469,6 +469,28 @@ textarea:focus {
   color: var(--fail-text);
 }
 
+/* 失败项可点击重试 */
+.msg-target.retryable {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+
+.msg-target.retryable:hover {
+  filter: brightness(0.95);
+}
+
+.msg-target .retry-icon {
+  font-weight: 600;
+  text-decoration: underline;
+  margin-left: 2px;
+}
+
+.msg-target.retrying {
+  opacity: 0.6;
+  cursor: default;
+  pointer-events: none;
+}
+
 .loading {
   padding: 20px;
   text-align: center;

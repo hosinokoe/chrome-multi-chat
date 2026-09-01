@@ -64,7 +64,7 @@ async function handleSendToTab(tabId, message, platform) {
     action: "fillAndSend",
     message: message,
     platform: platform
-  }, 10000);
+  }, 15000);
 
   return response;
 }
@@ -96,7 +96,7 @@ async function handleNavigateAndSend(tabId, message, platform, newChatUrl) {
     action: "fillAndSend",
     message: message,
     platform: platform
-  }, 10000);
+  }, 15000);
 
   return response;
 }
@@ -134,7 +134,7 @@ async function handleOpenAndSend(message, platform, openUrl) {
     action: "fillAndSend",
     message: message,
     platform: platform
-  }, 10000);
+  }, 15000);
 
   return response;
 }

@@ -100,7 +100,7 @@ const PLATFORM_ADAPTERS = {
 
 // ============ 核心发送逻辑 ============
 
-async function fillAndSend(platform, message) {
+async function fillAndSend(platform, message, onSent) {
   const adapter = PLATFORM_ADAPTERS[platform];
   if (!adapter) throw new Error("不支持的平台: " + platform);
 
@@ -120,10 +120,11 @@ async function fillAndSend(platform, message) {
   await wait(400);
 
   // 验证内容确实进入了输入框（Z.AI 等编辑器状态同步可能滞后）
-  await waitForInputFilled(input, message, 3000);
+  await waitForInputFilled(input, message, 1500);
 
-  // 点击发送按钮
-  const sent = await clickSend(adapter, input);
+  // 点击发送按钮。onSent 在发送动作触发的瞬间被调用，
+  // 以便在页面可能因发送而重渲染/导航、销毁本脚本上下文之前，立即回传成功响应。
+  const sent = await clickSend(adapter, input, onSent);
   if (!sent) {
     throw new Error("发送按钮未找到或不可点击");
   }
@@ -215,14 +216,14 @@ async function simulateTyping(input, message) {
   }
 }
 
-// 点击发送按钮
-async function clickSend(adapter, input) {
+// 点击发送按钮。onSent 在发送动作真正触发的瞬间调用（用于立即回传成功）。
+async function clickSend(adapter, input, onSent) {
   // 先等一下让框架处理输入
   await wait(200);
 
-  // 轮询等待发送按钮变为可用（最多 3 秒）
+  // 轮询等待发送按钮变为可用（最多 2 秒）
   // 内容同步到框架 state 后，禁用的发送按钮才会启用——这是"内容已就绪"最可靠的信号
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {
     const btn = adapter.getSendButton();
     if (btn) {
@@ -230,6 +231,7 @@ async function clickSend(adapter, input) {
                          btn.getAttribute("aria-disabled") === "true" ||
                          btn.classList.contains("disabled");
       if (!isDisabled) {
+        if (typeof onSent === "function") onSent(); // 点击前先回传成功，避免页面重渲染丢响应
         btn.click();
         return true;
       }
@@ -239,6 +241,7 @@ async function clickSend(adapter, input) {
 
   // 按钮始终不可用或找不到，回退到 Enter 键
   console.warn("[Multi Chat] 发送按钮不可用，回退到 Enter 键");
+  if (typeof onSent === "function") onSent(); // 回车前先回传成功
   const enterEvent = new KeyboardEvent("keydown", {
     key: "Enter",
     code: "Enter",
@@ -298,12 +301,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     console.log(`[Multi Chat] 收到发送指令: platform=${platform}, message="${message.substring(0, 30)}..."`);
 
-    fillAndSend(platform, message)
+    // 保证 sendResponse 只被调用一次
+    let responded = false;
+    const respondSuccess = () => {
+      if (responded) return;
+      responded = true;
+      console.log(`[Multi Chat] 发送动作已触发: ${platform}`);
+      sendResponse({ success: true });
+    };
+
+    fillAndSend(platform, message, respondSuccess)
       .then(() => {
-        console.log(`[Multi Chat] 发送成功: ${platform}`);
-        sendResponse({ success: true });
+        // 正常情况下发送动作触发时已经通过 onSent 回传成功；这里兜底
+        respondSuccess();
       })
       .catch(err => {
+        if (responded) return; // 已经回传过成功（发送动作已触发），忽略后续异常
+        responded = true;
         console.error(`[Multi Chat] 发送失败: ${platform}`, err);
         sendResponse({ success: false, error: err.message });
       });

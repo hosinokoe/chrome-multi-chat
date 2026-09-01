@@ -235,6 +235,66 @@ function setupEventListeners() {
   });
 }
 
+// ============ 单平台发送 ============
+
+// 向单个平台发送。返回结果对象（含 platformKey，供失败后手动重试用）。
+async function sendToOnePlatform(p, message) {
+  const isOpen = !!p.tab;
+  const mode = isOpen ? getTabMode(p.tab.id) : "open";
+
+  try {
+    console.log(`[Multi Chat] 发送到: ${p.name} (isOpen=${isOpen}, mode=${mode})`);
+
+    let response;
+
+    if (!isOpen) {
+      // 未打开：先新建标签页打开平台，再发送
+      response = await chrome.runtime.sendMessage({
+        action: "openAndSend",
+        message: message,
+        platform: p.key,
+        openUrl: p.newChatUrl
+      });
+    } else if (mode === "new") {
+      // 已打开 + 新对话：跳转到新对话页面再发送
+      response = await chrome.runtime.sendMessage({
+        action: "navigateAndSend",
+        tabId: p.tab.id,
+        message: message,
+        platform: p.key,
+        newChatUrl: p.newChatUrl
+      });
+    } else {
+      // 已打开 + 继续对话：直接发送
+      response = await chrome.runtime.sendMessage({
+        action: "sendToTab",
+        tabId: p.tab.id,
+        message: message,
+        platform: p.key
+      });
+    }
+
+    console.log(`[Multi Chat] 响应:`, response);
+
+    return {
+      platform: p.name,
+      platformKey: p.key,
+      mode: mode,
+      success: response && response.success,
+      error: response?.error || ((!response || !response.success) ? "未收到成功响应" : null)
+    };
+  } catch (err) {
+    console.error(`[Multi Chat] 发送异常:`, err);
+    return {
+      platform: p.name,
+      platformKey: p.key,
+      mode: mode,
+      success: false,
+      error: err.message || "通信失败"
+    };
+  }
+}
+
 // ============ 发送消息 ============
 
 async function sendMessage() {
@@ -263,62 +323,11 @@ async function sendMessage() {
   // 并行处理所有选中的目标：一次性打开/发送，而不是逐个等待
   const tasks = selectedIndices.map(async (index) => {
     const p = platformList[index];
-    const isOpen = !!p.tab;
-    const mode = isOpen ? getTabMode(p.tab.id) : "open";
-
-    try {
-      console.log(`[Multi Chat] 发送到: ${p.name} (isOpen=${isOpen}, mode=${mode})`);
-
-      let response;
-
-      if (!isOpen) {
-        // 未打开：先新建标签页打开平台，再发送
-        response = await chrome.runtime.sendMessage({
-          action: "openAndSend",
-          message: message,
-          platform: p.key,
-          openUrl: p.newChatUrl
-        });
-      } else if (mode === "new") {
-        // 已打开 + 新对话：跳转到新对话页面再发送
-        response = await chrome.runtime.sendMessage({
-          action: "navigateAndSend",
-          tabId: p.tab.id,
-          message: message,
-          platform: p.key,
-          newChatUrl: p.newChatUrl
-        });
-      } else {
-        // 已打开 + 继续对话：直接发送
-        response = await chrome.runtime.sendMessage({
-          action: "sendToTab",
-          tabId: p.tab.id,
-          message: message,
-          platform: p.key
-        });
-      }
-
-      console.log(`[Multi Chat] 响应:`, response);
-
-      return {
-        platform: p.name,
-        mode: mode,
-        success: response && response.success,
-        error: response?.error || ((!response || !response.success) ? "未收到成功响应" : null)
-      };
-    } catch (err) {
-      console.error(`[Multi Chat] 发送异常:`, err);
-      return {
-        platform: p.name,
-        mode: mode,
-        success: false,
-        error: err.message || "通信失败"
-      };
-    } finally {
-      // 每完成一个任务，更新进度显示
-      completed++;
-      sendBtn.textContent = `发送中 (${completed}/${total})`;
-    }
+    const result = await sendToOnePlatform(p, message);
+    // 每完成一个任务，更新进度显示
+    completed++;
+    sendBtn.textContent = `发送中 (${completed}/${total})`;
+    return result;
   });
 
   // 等待所有任务完成（并行执行）
@@ -395,14 +404,30 @@ function renderHistory(history) {
       <div class="msg-time">${item.time}</div>
       <div class="msg-content">${escapeHtml(item.message)}</div>
       <div class="msg-targets">
-        ${item.results.map(r => `
-          <span class="msg-target ${r.success ? 'success' : 'fail'}" title="${r.error || ''}">
-            ${r.success ? '✓' : '✗'} ${r.platform}${r.mode === 'new' ? '(新)' : r.mode === 'open' ? '(打开)' : ''}${r.error ? ': ' + r.error : ''}
-          </span>
-        `).join("")}
+        ${item.results.map((r, ri) => {
+          const label = `${r.success ? '✓' : '✗'} ${r.platform}${r.mode === 'new' ? '(新)' : r.mode === 'open' ? '(打开)' : ''}${r.error ? ': ' + r.error : ''}`;
+          if (r.success) {
+            return `<span class="msg-target success" title="${r.error || ''}">${label}</span>`;
+          }
+          // 失败项：渲染为可点击的重试按钮
+          return `<span class="msg-target fail retryable" title="点击重试 · ${r.error || ''}"
+                        data-retry-id="${item.id}" data-retry-index="${ri}">
+                    ${label} <span class="retry-icon">↻ 重试</span>
+                  </span>`;
+        }).join("")}
       </div>
     </div>
   `).join("");
+
+  // 重试按钮：点击重新发送该失败的平台
+  container.querySelectorAll(".msg-target.retryable").forEach(el => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation(); // 不触发"点击历史项重新填入"
+      const historyId = parseInt(el.dataset.retryId);
+      const resultIndex = parseInt(el.dataset.retryIndex);
+      retryOne(historyId, resultIndex, el);
+    });
+  });
 
   // 点击历史项可重新填入
   container.querySelectorAll(".history-item").forEach(el => {
@@ -415,6 +440,45 @@ function renderHistory(history) {
       }
     });
   });
+}
+
+// 重试单个失败的平台
+async function retryOne(historyId, resultIndex, btnEl) {
+  const data = await chrome.storage.local.get(HISTORY_KEY);
+  const history = data[HISTORY_KEY] || [];
+  const item = history.find(h => h.id === historyId);
+  if (!item) return;
+
+  const failed = item.results[resultIndex];
+  if (!failed) return;
+
+  // 根据 platformKey 找到当前的平台项（可能标签页状态已变，重新检测）
+  await detectPlatforms();
+  const p = platformList.find(pl => pl.key === failed.platformKey);
+  if (!p) {
+    showToast(`找不到平台 ${failed.platform}`, "error");
+    return;
+  }
+
+  // 按钮进入"重试中"状态
+  btnEl.classList.add("retrying");
+  const iconEl = btnEl.querySelector(".retry-icon");
+  const originalIcon = iconEl ? iconEl.textContent : "";
+  if (iconEl) iconEl.textContent = "发送中…";
+
+  const result = await sendToOnePlatform(p, item.message);
+
+  // 更新该条历史记录的对应结果
+  item.results[resultIndex] = result;
+  await chrome.storage.local.set({ [HISTORY_KEY]: history });
+
+  // 重新渲染历史并提示
+  renderHistory(history);
+  if (result.success) {
+    showToast(`${result.platform} 重试成功`, "success");
+  } else {
+    showToast(`${result.platform} 重试失败: ${result.error}`, "error");
+  }
 }
 
 // ============ 工具函数 ============
