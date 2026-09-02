@@ -1,6 +1,13 @@
 // Content Script - 负责在各聊天平台页面中注入消息并触发发送
 // 核心策略：使用 clipboard API + execCommand 模拟真实粘贴，比直接 innerHTML 更可靠
 
+// 防止重复注入：manifest 自动注入 + background 手动注入可能导致同一页面注入多次，
+// 重复执行会因 const 重复声明而整个脚本报错。用全局守卫确保只初始化一次。
+if (window.__multiChatContentLoaded) {
+  console.log("[Multi Chat] Content script 已存在，跳过重复注入");
+} else {
+  window.__multiChatContentLoaded = true;
+
 // 各平台的 DOM 选择器和操作方式
 const PLATFORM_ADAPTERS = {
   chatgpt: {
@@ -122,9 +129,8 @@ async function fillAndSend(platform, message, onSent) {
   // 验证内容确实进入了输入框（Z.AI 等编辑器状态同步可能滞后）
   await waitForInputFilled(input, message, 1500);
 
-  // 点击发送按钮。onSent 在发送动作触发的瞬间被调用，
-  // 以便在页面可能因发送而重渲染/导航、销毁本脚本上下文之前，立即回传成功响应。
-  const sent = await clickSend(adapter, input, onSent);
+  // 点击发送按钮，随后确认消息真的发出去了（输入框清空或消息出现在对话区）。
+  const sent = await clickSend(adapter, input, message, onSent);
   if (!sent) {
     throw new Error("发送按钮未找到或不可点击");
   }
@@ -216,13 +222,78 @@ async function simulateTyping(input, message) {
   }
 }
 
-// 点击发送按钮。onSent 在发送动作真正触发的瞬间调用（用于立即回传成功）。
-async function clickSend(adapter, input, onSent) {
+// 读取输入框当前文本
+function getInputText(input) {
+  return (input.tagName === "TEXTAREA" || input.tagName === "INPUT")
+    ? input.value
+    : input.textContent;
+}
+
+// 发送成功的判定：满足任一即视为成功
+//   1) 输入框被清空（大多数平台发送后会清空输入框）
+//   2) 刚发送的消息文本出现在输入框之外（即出现在了对话区）
+// 轮询检测，返回 true = 确认成功；false = 超时仍未确认（可能未发出）。
+async function confirmSent(adapter, message, timeout) {
+  const snippet = message.trim().slice(0, 30); // 用前 30 字符作为匹配特征
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    // 页面可能重渲染/跳转，重新取输入框引用；取不到视为已提交
+    let input;
+    try {
+      input = adapter.getInput();
+    } catch {
+      return true;
+    }
+    if (!input) return true; // 输入框不在了（页面跳转/重渲染），说明已提交
+
+    const inputText = getInputText(input);
+    const inputEmpty = !inputText || inputText.trim() === "";
+
+    // 信号 1：输入框已清空
+    if (inputEmpty) return true;
+
+    // 信号 2：消息已出现在对话区（输入框之外）
+    if (snippet && messageAppearedOutsideInput(input, snippet)) return true;
+
+    await wait(150);
+  }
+  return false;
+}
+
+// 检查刚发送的消息文本是否出现在输入框之外（对话区）。
+// 发送前该文本只在输入框内；发送后会出现在消息气泡里。
+function messageAppearedOutsideInput(input, snippet) {
+  const bodyText = document.body.innerText || "";
+  // 出现次数：如果输入框里还留着（未清空），body 里至少 1 次
+  // 只要对话区也出现了，总次数 >= 2；或输入框已不含该文本但 body 含有
+  const inputText = getInputText(input) || "";
+  const inInput = inputText.includes(snippet);
+  const occurrences = countOccurrences(bodyText, snippet);
+
+  if (!inInput && occurrences >= 1) return true;      // 输入框已无该文本，但页面上有 → 在对话区
+  if (inInput && occurrences >= 2) return true;        // 输入框有 + 对话区也有
+  return false;
+}
+
+function countOccurrences(haystack, needle) {
+  if (!needle) return 0;
+  let count = 0, idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    count++;
+    idx += needle.length;
+  }
+  return count;
+}
+
+// 点击发送按钮。onSent 在确认发送成功时调用。
+async function clickSend(adapter, input, message, onSent) {
   // 先等一下让框架处理输入
   await wait(200);
 
-  // 轮询等待发送按钮变为可用（最多 2 秒）
-  // 内容同步到框架 state 后，禁用的发送按钮才会启用——这是"内容已就绪"最可靠的信号
+  let triggered = false;
+
+  // 轮询等待发送按钮变为可用（最多 2 秒），可用则点击
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {
     const btn = adapter.getSendButton();
@@ -231,37 +302,44 @@ async function clickSend(adapter, input, onSent) {
                          btn.getAttribute("aria-disabled") === "true" ||
                          btn.classList.contains("disabled");
       if (!isDisabled) {
-        if (typeof onSent === "function") onSent(); // 点击前先回传成功，避免页面重渲染丢响应
         btn.click();
-        return true;
+        triggered = true;
+        break;
       }
     }
     await wait(150);
   }
 
-  // 按钮始终不可用或找不到，回退到 Enter 键
-  console.warn("[Multi Chat] 发送按钮不可用，回退到 Enter 键");
-  if (typeof onSent === "function") onSent(); // 回车前先回传成功
-  const enterEvent = new KeyboardEvent("keydown", {
-    key: "Enter",
-    code: "Enter",
-    keyCode: 13,
-    which: 13,
-    bubbles: true,
-    cancelable: true
-  });
-  input.dispatchEvent(enterEvent);
+  // 按钮不可用则回退到 Enter 键
+  if (!triggered) {
+    console.warn("[Multi Chat] 发送按钮不可用，回退到 Enter 键");
+    const enterEvent = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true
+    });
+    input.dispatchEvent(enterEvent);
+    await wait(50);
+    input.dispatchEvent(new KeyboardEvent("keyup", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      bubbles: true
+    }));
+  }
 
-  // 也触发 keyup
-  await wait(50);
-  input.dispatchEvent(new KeyboardEvent("keyup", {
-    key: "Enter",
-    code: "Enter",
-    keyCode: 13,
-    which: 13,
-    bubbles: true
-  }));
+  // 确认真的发出去了：输入框被清空 或 消息已出现在对话区。最多等 4 秒。
+  const confirmed = await confirmSent(adapter, message, 4000);
+  if (!confirmed) {
+    // 输入框仍有内容且对话区没出现该消息——发送很可能没成功（Z.AI 偶发的情况）
+    throw new Error("发送未确认：输入框未清空且对话区未出现该消息");
+  }
 
+  if (typeof onSent === "function") onSent();
   return true;
 }
 
@@ -344,3 +422,5 @@ function detectCurrentPlatform() {
 }
 
 console.log("[Multi Chat] Content script loaded:", window.location.href);
+
+} // end 防止重复注入守卫
