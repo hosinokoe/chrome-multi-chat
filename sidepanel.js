@@ -2,13 +2,18 @@
 
 const PLATFORMS = {
   chatgpt: { name: "ChatGPT", patterns: ["chatgpt.com", "chat.openai.com"], newChatUrl: "https://chatgpt.com/" },
-  claude: { name: "Claude", patterns: ["claude.ai"], newChatUrl: "https://claude.ai/new" },
   gemini: { name: "Gemini", patterns: ["gemini.google.com"], newChatUrl: "https://gemini.google.com/app" },
-  tongyi: { name: "通义千问", patterns: ["tongyi.aliyun.com"], newChatUrl: "https://tongyi.aliyun.com/qianwen/" },
+  tongyi: { name: "通义千问", patterns: ["tongyi.aliyun.com", "tongyi.com", "qianwen.com"], newChatUrl: "https://www.qianwen.com/" },
   deepseek: { name: "DeepSeek", patterns: ["chat.deepseek.com"], newChatUrl: "https://chat.deepseek.com/" },
-  kimi: { name: "Kimi", patterns: ["kimi.moonshot.cn", "www.kimi.com"], newChatUrl: "https://www.kimi.com/" },
-  zai: { name: "Z.AI", patterns: ["chat.z.ai"], newChatUrl: "https://chat.z.ai/" }
+  zai: { name: "Z.AI", patterns: ["chat.z.ai"], newChatUrl: "https://chat.z.ai/" },
+  doubao: { name: "豆包", patterns: ["doubao.com"], newChatUrl: "https://www.doubao.com/chat/" },
+  // Claude 爱封号、Kimi 额度限制多，排在最后且默认不选
+  claude: { name: "Claude", patterns: ["claude.ai"], newChatUrl: "https://claude.ai/new" },
+  kimi: { name: "Kimi", patterns: ["kimi.moonshot.cn", "www.kimi.com"], newChatUrl: "https://www.kimi.com/" }
 };
+
+// "默认"勾选时排除的平台（Claude/Kimi）
+const DEFAULT_UNCHECKED = ["claude", "kimi"];
 
 const HISTORY_KEY = "multiChatHistory";
 const MODE_KEY = "multiChatModes";
@@ -138,7 +143,7 @@ function renderPlatformList(container) {
     const isOpen = !!p.tab;
     const mode = isOpen ? getTabMode(p.tab.id) : null;
 
-    // 未打开的平台：默认不勾选，显示"未打开"标记 + "打开并发送"提示
+    // 初始默认勾选：已打开的平台
     const checked = isOpen ? "checked" : "";
     const statusBadge = isOpen
       ? ""
@@ -207,6 +212,14 @@ function setupEventListeners() {
     document.querySelectorAll("#tab-list input[type='checkbox']").forEach(cb => cb.checked = false);
     updateTargetCount();
   });
+  // 默认：选中除 Claude/Kimi 外的所有平台
+  document.getElementById("select-default").addEventListener("click", () => {
+    document.querySelectorAll("#tab-list input[type='checkbox']").forEach(cb => {
+      const p = platformList[parseInt(cb.dataset.index)];
+      cb.checked = p ? !DEFAULT_UNCHECKED.includes(p.key) : false;
+    });
+    updateTargetCount();
+  });
 
   // checkbox 变化
   document.getElementById("tab-list").addEventListener("change", (e) => {
@@ -239,11 +252,23 @@ function setupEventListeners() {
 
 // 向单个平台发送。返回结果对象（含 platformKey，供失败后手动重试用）。
 async function sendToOnePlatform(p, message) {
-  const isOpen = !!p.tab;
+  let isOpen = !!p.tab;
   const mode = isOpen ? getTabMode(p.tab.id) : "open";
+  const manualSend = !!(PLATFORMS[p.key] && PLATFORMS[p.key].manualSend);
+
+  // 已打开的平台：先验证缓存的 tab 是否仍存在（可能已被关闭/ID 失效），
+  // 失效则降级为"打开新标签页发送"，避免 "No tab with id" 报错。
+  if (isOpen) {
+    try {
+      await chrome.tabs.get(p.tab.id);
+    } catch {
+      console.warn(`[Multi Chat] ${p.name} 的标签页已失效，改为新开标签页发送`);
+      isOpen = false;
+    }
+  }
 
   try {
-    console.log(`[Multi Chat] 发送到: ${p.name} (isOpen=${isOpen}, mode=${mode})`);
+    console.log(`[Multi Chat] 发送到: ${p.name} (isOpen=${isOpen}, mode=${mode}, manualSend=${manualSend})`);
 
     let response;
 
@@ -253,7 +278,8 @@ async function sendToOnePlatform(p, message) {
         action: "openAndSend",
         message: message,
         platform: p.key,
-        openUrl: p.newChatUrl
+        openUrl: p.newChatUrl,
+        manualSend: manualSend
       });
     } else if (mode === "new") {
       // 已打开 + 新对话：跳转到新对话页面再发送
@@ -262,7 +288,8 @@ async function sendToOnePlatform(p, message) {
         tabId: p.tab.id,
         message: message,
         platform: p.key,
-        newChatUrl: p.newChatUrl
+        newChatUrl: p.newChatUrl,
+        manualSend: manualSend
       });
     } else {
       // 已打开 + 继续对话：直接发送
@@ -270,7 +297,8 @@ async function sendToOnePlatform(p, message) {
         action: "sendToTab",
         tabId: p.tab.id,
         message: message,
-        platform: p.key
+        platform: p.key,
+        manualSend: manualSend
       });
     }
 
@@ -281,6 +309,7 @@ async function sendToOnePlatform(p, message) {
       platformKey: p.key,
       mode: mode,
       success: response && response.success,
+      manualSend: !!(response && response.manualSend),
       error: response?.error || ((!response || !response.success) ? "未收到成功响应" : null)
     };
   } catch (err) {
@@ -405,7 +434,7 @@ function renderHistory(history) {
       <div class="msg-content">${escapeHtml(item.message)}</div>
       <div class="msg-targets">
         ${item.results.map((r, ri) => {
-          const label = `${r.success ? '✓' : '✗'} ${r.platform}${r.mode === 'new' ? '(新)' : r.mode === 'open' ? '(打开)' : ''}${r.error ? ': ' + r.error : ''}`;
+          const label = `${r.success ? '✓' : '✗'} ${r.platform}${r.mode === 'new' ? '(新)' : r.mode === 'open' ? '(打开)' : ''}${r.manualSend ? ' (已填入，请手动回车)' : ''}${r.error ? ': ' + r.error : ''}`;
           if (r.success) {
             return `<span class="msg-target success" title="${r.error || ''}">${label}</span>`;
           }

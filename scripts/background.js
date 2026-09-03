@@ -8,7 +8,7 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "sendToTab") {
     console.log(`[Multi Chat BG] sendToTab: tabId=${request.tabId}, platform=${request.platform}`);
-    handleSendToTab(request.tabId, request.message, request.platform)
+    handleSendToTab(request.tabId, request.message, request.platform, request.manualSend)
       .then(result => {
         console.log(`[Multi Chat BG] sendToTab result:`, result);
         sendResponse(result);
@@ -22,7 +22,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === "navigateAndSend") {
     console.log(`[Multi Chat BG] navigateAndSend: tabId=${request.tabId}, platform=${request.platform}, url=${request.newChatUrl}`);
-    handleNavigateAndSend(request.tabId, request.message, request.platform, request.newChatUrl)
+    handleNavigateAndSend(request.tabId, request.message, request.platform, request.newChatUrl, request.manualSend)
       .then(result => {
         console.log(`[Multi Chat BG] navigateAndSend result:`, result);
         sendResponse(result);
@@ -36,7 +36,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === "openAndSend") {
     console.log(`[Multi Chat BG] openAndSend: platform=${request.platform}, url=${request.openUrl}`);
-    handleOpenAndSend(request.message, request.platform, request.openUrl)
+    handleOpenAndSend(request.message, request.platform, request.openUrl, request.manualSend)
       .then(result => {
         console.log(`[Multi Chat BG] openAndSend result:`, result);
         sendResponse(result);
@@ -57,13 +57,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // ============ 继续对话：直接发送 ============
 
-async function handleSendToTab(tabId, message, platform) {
+async function handleSendToTab(tabId, message, platform, manualSend) {
   await ensureContentScriptInjected(tabId);
 
   const response = await sendMessageToTabWithTimeout(tabId, {
     action: "fillAndSend",
     message: message,
-    platform: platform
+    platform: platform,
+    manualSend: manualSend
   }, 15000);
 
   return response;
@@ -71,7 +72,7 @@ async function handleSendToTab(tabId, message, platform) {
 
 // ============ 新对话：导航 → 等待加载 → 等输入框 → 发送 ============
 
-async function handleNavigateAndSend(tabId, message, platform, newChatUrl) {
+async function handleNavigateAndSend(tabId, message, platform, newChatUrl, manualSend) {
   // 第一步：导航到新对话页面
   console.log(`[Multi Chat BG] Navigating tab ${tabId} to ${newChatUrl}`);
   await chrome.tabs.update(tabId, { url: newChatUrl });
@@ -95,7 +96,8 @@ async function handleNavigateAndSend(tabId, message, platform, newChatUrl) {
   const response = await sendMessageToTabWithTimeout(tabId, {
     action: "fillAndSend",
     message: message,
-    platform: platform
+    platform: platform,
+    manualSend: manualSend
   }, 15000);
 
   return response;
@@ -103,7 +105,7 @@ async function handleNavigateAndSend(tabId, message, platform, newChatUrl) {
 
 // ============ 新建标签页：打开 → 等待加载 → 等输入框 → 发送 ============
 
-async function handleOpenAndSend(message, platform, openUrl) {
+async function handleOpenAndSend(message, platform, openUrl, manualSend) {
   // 第一步：新建标签页（后台打开，不激活以免打断用户）
   console.log(`[Multi Chat BG] Creating new tab: ${openUrl}`);
   const tab = await chrome.tabs.create({ url: openUrl, active: false });
@@ -133,7 +135,8 @@ async function handleOpenAndSend(message, platform, openUrl) {
   const response = await sendMessageToTabWithTimeout(tabId, {
     action: "fillAndSend",
     message: message,
-    platform: platform
+    platform: platform,
+    manualSend: manualSend
   }, 15000);
 
   return response;

@@ -10,10 +10,14 @@
     "https://claude.ai/*",
     "https://gemini.google.com/*",
     "https://tongyi.aliyun.com/*",
+    "https://*.tongyi.com/*",
+    "https://*.qianwen.com/*",
     "https://chat.deepseek.com/*",
     "https://kimi.moonshot.cn/*",
     "https://www.kimi.com/*",
-    "https://chat.z.ai/*"
+    "https://chat.z.ai/*",
+    "https://www.doubao.com/*",
+    "https://doubao.com/*"
   ],
   "action": {
     "default_icon": {
@@ -41,10 +45,14 @@
         "https://claude.ai/*",
         "https://gemini.google.com/*",
         "https://tongyi.aliyun.com/*",
+        "https://*.tongyi.com/*",
+        "https://*.qianwen.com/*",
         "https://chat.deepseek.com/*",
         "https://kimi.moonshot.cn/*",
         "https://www.kimi.com/*",
-        "https://chat.z.ai/*"
+        "https://chat.z.ai/*",
+        "https://www.doubao.com/*",
+        "https://doubao.com/*"
       ],
       "js": ["scripts/content.js"],
       "run_at": "document_idle"

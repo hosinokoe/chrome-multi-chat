@@ -52,14 +52,19 @@ const PLATFORM_ADAPTERS = {
 
   tongyi: {
     getInput() {
-      return document.querySelector('textarea[class*="chat"]') ||
+      // 新版千问(www.qianwen.com)用 Slate 编辑器；旧版用 textarea
+      return document.querySelector('[data-slate-editor="true"]') ||
+             document.querySelector('div[contenteditable="true"][role="textbox"]') ||
+             document.querySelector('textarea[class*="chat"]') ||
              document.querySelector('#china-main textarea') ||
+             document.querySelector('[contenteditable="true"]') ||
              document.querySelector('textarea');
     },
     getSendButton() {
-      return document.querySelector('button[class*="send"]') ||
-             document.querySelector('[class*="operateBtn"]') ||
-             document.querySelector('[data-testid*="send"]');
+      return document.querySelector('[data-testid*="send"]') ||
+             document.querySelector('button[aria-label*="发送"]') ||
+             document.querySelector('button[class*="send"]') ||
+             document.querySelector('[class*="operateBtn"]');
     }
   },
 
@@ -102,17 +107,119 @@ const PLATFORM_ADAPTERS = {
              document.querySelector('button[aria-label*="send"]') ||
              document.querySelector('button[class*="send"]');
     }
+  },
+
+  doubao: {
+    getInput() {
+      return document.querySelector('textarea[data-testid="chat_input_input"]') ||
+             document.querySelector('textarea') ||
+             document.querySelector('[contenteditable="true"]');
+    },
+    getSendButton() {
+      return document.querySelector('[data-testid="chat_input_send_button"]') ||
+             document.querySelector('button[aria-label*="发送"]') ||
+             document.querySelector('button[class*="send"]') ||
+             document.querySelector('[class*="send"][role="button"]');
+    }
   }
 };
 
 // ============ 核心发送逻辑 ============
 
-async function fillAndSend(platform, message, onSent) {
+// 通用：检测"停止生成"按钮（上一条还在生成时，发送按钮会变成停止按钮）。
+// 各平台停止按钮多以 aria-label / data-testid 含 stop 标识，或按钮内含方形停止图标。
+function getStopButton() {
+  return document.querySelector('button[data-testid="stop-button"]') ||
+         document.querySelector('button[aria-label*="Stop" i]') ||
+         document.querySelector('button[aria-label*="停止"]') ||
+         document.querySelector('button[aria-label*="stop generating" i]') ||
+         null;
+}
+
+// 如果页面正在生成（存在停止按钮），先停止，等待恢复到可发送状态。
+async function stopIfGenerating() {
+  const stopBtn = getStopButton();
+  if (!stopBtn) return;
+
+  console.log("[Multi Chat] 检测到正在生成，先点击停止");
+  stopBtn.click();
+
+  // 等待停止按钮消失（恢复为发送状态），最多 3 秒
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (!getStopButton()) return;
+    await wait(200);
+  }
+  console.warn("[Multi Chat] 停止后未在预期时间内恢复，继续尝试发送");
+}
+
+// 检测"额度用完/需要升级"等阻止发送的提示。
+// 只在输入框附近区域检测，避免误伤用户消息内容里的相同词汇。
+// 返回提示文本（表示不可发送）或 null。
+function detectBlockingNotice(input) {
+  if (!input) return null;
+
+  // 完全无法发送文本的关键词（额度耗尽类）
+  const blockingPatterns = [
+    /免费额度.*用完/,
+    /额度.*(已用完|用尽|耗尽)/,
+    /消息.*(已用完|达到上限)/,
+    /out of (free )?(quota|credits|messages)/i,
+    /usage limit reached/i,
+    /you'?ve reached your.*(message |usage )?limit/i,
+    /rate limit(ed)?/i
+  ];
+
+  // "文本仍可用"的豁免词——命中这些说明只是部分功能受限（如 ChatGPT 的文件/图像/数据分析
+  // 受限，但仍可纯文本聊天），此时不应阻止发送。
+  const allowPatterns = [
+    /仅使用文本/,
+    /继续.*文本聊天/,
+    /可以继续/,
+    /仍可.*(使用|聊天|发送)/,
+    /continue.*(with )?text/i,
+    /text (chat|only)/i,
+    /still (use|chat|send)/i
+  ];
+
+  // 从输入框向上找最多 5 层祖先，检查其中的可见文本
+  let node = input;
+  for (let i = 0; i < 5 && node; i++) {
+    node = node.parentElement;
+    if (!node) break;
+    if (node.offsetParent === null && node.offsetHeight === 0) continue;
+    const text = (node.innerText || "").slice(0, 400);
+
+    // 先看是否命中"完全不可发送"关键词
+    const hitBlocking = blockingPatterns.find(re => re.test(text));
+    if (hitBlocking) {
+      // 若同一区域还提示"文本仍可用"，则不算阻止（只是部分功能受限）
+      if (allowPatterns.some(re => re.test(text))) {
+        console.log("[Multi Chat] 检测到额度提示，但文本仍可用，继续发送");
+        return null;
+      }
+      const line = text.split("\n").find(l => hitBlocking.test(l)) || text.slice(0, 40);
+      return line.trim().slice(0, 60);
+    }
+  }
+  return null;
+}
+
+async function fillAndSend(platform, message, onSent, manualSend) {
   const adapter = PLATFORM_ADAPTERS[platform];
   if (!adapter) throw new Error("不支持的平台: " + platform);
 
   const input = adapter.getInput();
   if (!input) throw new Error("找不到输入框，请确认页面已完全加载");
+
+  // 检测额度用完/需要升级等阻止发送的提示，命中则直接停止，不浪费时间尝试
+  const blocking = detectBlockingNotice(input);
+  if (blocking) {
+    throw new Error("无法发送：" + blocking);
+  }
+
+  // 若上一条还在生成中（发送按钮变成了停止按钮），先停止再发送
+  await stopIfGenerating();
 
   // 聚焦输入框
   input.focus();
@@ -128,6 +235,14 @@ async function fillAndSend(platform, message, onSent) {
 
   // 验证内容确实进入了输入框（Z.AI 等编辑器状态同步可能滞后）
   await waitForInputFilled(input, message, 1500);
+
+  // manualSend 平台（如通义千问，严格校验 isTrusted，程序化发送无法触发）：
+  // 只填入内容，提示用户手动按回车发送。
+  if (manualSend) {
+    console.log(`[Multi Chat] ${platform} 需手动发送，已填入内容`);
+    if (typeof onSent === "function") onSent({ manualSend: true });
+    return true;
+  }
 
   // 点击发送按钮，随后确认消息真的发出去了（输入框清空或消息出现在对话区）。
   const sent = await clickSend(adapter, input, message, onSent);
@@ -182,43 +297,80 @@ async function simulateTyping(input, message) {
   input.focus();
 
   if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
-    // 对于 textarea，使用 native value setter + input 事件
-    // 这是让 React controlled input 识别变化的最可靠方式
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype, "value"
-    )?.set || Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype, "value"
-    )?.set;
-
-    if (nativeSetter) {
-      nativeSetter.call(input, message);
-    } else {
-      input.value = message;
-    }
-
-    // 触发完整的事件序列
-    input.dispatchEvent(new Event("focus", { bubbles: true }));
-    input.dispatchEvent(new Event("input", { bubbles: true, inputType: "insertText" }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-
-  } else {
-    // contenteditable: 使用 execCommand('insertText') - 这是最接近用户输入的方式
-    // 它会被 ProseMirror/Slate 等编辑器正确捕获
+    // 优先用 execCommand insertText 模拟真实键盘输入——Vue(v-model)/React 都能可靠识别，
+    // 比 native value setter + 普通 input 事件更稳（千问等 Vue 应用靠这个才认为"有内容"、启用发送按钮）
+    input.focus();
+    // 先选中已有内容以便替换（clearInput 已清空，这里是保险）
+    input.select();
     const inserted = document.execCommand("insertText", false, message);
 
-    if (!inserted) {
-      // fallback: 使用 InputEvent
-      input.textContent = message;
+    if (!inserted || !input.value || !input.value.includes(message.slice(0, 10))) {
+      // fallback：native value setter + 完整 InputEvent（带 inputType/data，框架更易识别）
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, "value"
+      )?.set || Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, "value"
+      )?.set;
+
+      if (nativeSetter) {
+        nativeSetter.call(input, message);
+      } else {
+        input.value = message;
+      }
+
       input.dispatchEvent(new InputEvent("input", {
         bubbles: true,
         cancelable: true,
         inputType: "insertText",
         data: message
       }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    // 额外触发事件确保框架感知
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+  } else {
+    // contenteditable 富文本编辑器（Slate/ProseMirror 等）
+    // Slate 只认 beforeinput 事件流来更新其内部 state，纯 execCommand 只改 DOM 不改 state，
+    // 会导致"看起来有字但编辑器认为是空的、无法发送"。所以先派发 beforeinput。
+    input.focus();
+    // 光标移到内容末尾
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) { /* ignore */ }
+
+    // 1) 派发 beforeinput（Slate 监听此事件更新 state）
+    let beforeinputHandled = false;
+    try {
+      const bi = new InputEvent("beforeinput", {
+        inputType: "insertText",
+        data: message,
+        bubbles: true,
+        cancelable: true,
+        composed: true
+      });
+      beforeinputHandled = !input.dispatchEvent(bi); // 被 preventDefault 说明编辑器接管了
+    } catch (e) { /* 某些环境不支持构造 InputEvent，忽略 */ }
+
+    // 2) execCommand 兜底（对 ProseMirror 等有效；Slate 若已处理 beforeinput 则这里可能重复，
+    //    但重复内容比没内容好，且多数编辑器会去重/以 state 为准）
+    if (!beforeinputHandled) {
+      const inserted = document.execCommand("insertText", false, message);
+      if (!inserted) {
+        input.textContent = message;
+      }
+    }
+
+    // 3) 派发 input 事件通知框架
+    input.dispatchEvent(new InputEvent("input", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "insertText",
+      data: message
+    }));
   }
 }
 
@@ -286,6 +438,58 @@ function countOccurrences(haystack, needle) {
   return count;
 }
 
+// 模拟按下 Enter 发送。强化版：确保光标在编辑器内，向多个目标派发完整事件序列。
+function pressEnter(input) {
+  // 1) 确保光标落在编辑器内容末尾（Slate 的回车处理依赖有效 selection）
+  try {
+    input.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    range.collapse(false); // 折叠到末尾
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch (e) {
+    console.warn("[Multi Chat] 设置光标失败", e);
+  }
+
+  const opts = {
+    key: "Enter",
+    code: "Enter",
+    keyCode: 13,
+    which: 13,
+    charCode: 13,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window
+  };
+
+  // 2) 向多个目标派发（不同 Slate 实现把 keydown 处理器挂在不同层级）
+  const targets = [];
+  if (document.activeElement && document.activeElement !== document.body) {
+    targets.push(document.activeElement);
+  }
+  if (!targets.includes(input)) targets.push(input);
+  targets.push(document);
+
+  for (const t of targets) {
+    t.dispatchEvent(new KeyboardEvent("keydown", opts));
+    t.dispatchEvent(new KeyboardEvent("keypress", opts));
+    t.dispatchEvent(new KeyboardEvent("keyup", opts));
+  }
+
+  // 3) 额外尝试 beforeinput insertParagraph（Slate 处理回车的标准 inputType）
+  try {
+    input.dispatchEvent(new InputEvent("beforeinput", {
+      inputType: "insertParagraph",
+      bubbles: true,
+      cancelable: true,
+      composed: true
+    }));
+  } catch (e) { /* 某些浏览器不支持构造，忽略 */ }
+}
+
 // 点击发送按钮。onSent 在确认发送成功时调用。
 async function clickSend(adapter, input, message, onSent) {
   // 先等一下让框架处理输入
@@ -313,23 +517,7 @@ async function clickSend(adapter, input, message, onSent) {
   // 按钮不可用则回退到 Enter 键
   if (!triggered) {
     console.warn("[Multi Chat] 发送按钮不可用，回退到 Enter 键");
-    const enterEvent = new KeyboardEvent("keydown", {
-      key: "Enter",
-      code: "Enter",
-      keyCode: 13,
-      which: 13,
-      bubbles: true,
-      cancelable: true
-    });
-    input.dispatchEvent(enterEvent);
-    await wait(50);
-    input.dispatchEvent(new KeyboardEvent("keyup", {
-      key: "Enter",
-      code: "Enter",
-      keyCode: 13,
-      which: 13,
-      bubbles: true
-    }));
+    pressEnter(input);
   }
 
   // 确认真的发出去了：输入框被清空 或 消息已出现在对话区。最多等 4 秒。
@@ -376,19 +564,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "fillAndSend") {
     const platform = request.platform;
     const message = request.message;
+    const manualSend = !!request.manualSend;
 
-    console.log(`[Multi Chat] 收到发送指令: platform=${platform}, message="${message.substring(0, 30)}..."`);
+    console.log(`[Multi Chat] 收到发送指令: platform=${platform}, manualSend=${manualSend}, message="${message.substring(0, 30)}..."`);
 
     // 保证 sendResponse 只被调用一次
     let responded = false;
-    const respondSuccess = () => {
+    const respondSuccess = (extra) => {
       if (responded) return;
       responded = true;
       console.log(`[Multi Chat] 发送动作已触发: ${platform}`);
-      sendResponse({ success: true });
+      sendResponse(Object.assign({ success: true }, extra || {}));
     };
 
-    fillAndSend(platform, message, respondSuccess)
+    fillAndSend(platform, message, respondSuccess, manualSend)
       .then(() => {
         // 正常情况下发送动作触发时已经通过 onSent 回传成功；这里兜底
         respondSuccess();
@@ -411,10 +600,11 @@ function detectCurrentPlatform() {
     // 简单匹配
     if (url.includes(key) || 
         (key === "chatgpt" && (url.includes("chatgpt.com") || url.includes("chat.openai.com"))) ||
-        (key === "tongyi" && url.includes("tongyi.aliyun.com")) ||
+        (key === "tongyi" && (url.includes("tongyi.aliyun.com") || url.includes("tongyi.com") || url.includes("qianwen.com"))) ||
         (key === "deepseek" && url.includes("chat.deepseek.com")) ||
         (key === "kimi" && (url.includes("kimi.moonshot.cn") || url.includes("kimi.com"))) ||
-        (key === "zai" && url.includes("chat.z.ai"))) {
+        (key === "zai" && url.includes("chat.z.ai")) ||
+        (key === "doubao" && url.includes("doubao.com"))) {
       return key;
     }
   }
