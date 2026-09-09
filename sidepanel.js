@@ -6,6 +6,7 @@ const PLATFORMS = {
   tongyi: { name: "通义千问", patterns: ["tongyi.aliyun.com", "tongyi.com", "qianwen.com"], newChatUrl: "https://www.qianwen.com/" },
   deepseek: { name: "DeepSeek", patterns: ["chat.deepseek.com"], newChatUrl: "https://chat.deepseek.com/" },
   zai: { name: "Z.AI", patterns: ["chat.z.ai"], newChatUrl: "https://chat.z.ai/" },
+  grok: { name: "Grok", patterns: ["grok.com"], newChatUrl: "https://grok.com/" },
   doubao: { name: "豆包", patterns: ["doubao.com"], newChatUrl: "https://www.doubao.com/chat/" },
   // Claude 爱封号、Kimi 额度限制多，排在最后且默认不选
   claude: { name: "Claude", patterns: ["claude.ai"], newChatUrl: "https://claude.ai/new" },

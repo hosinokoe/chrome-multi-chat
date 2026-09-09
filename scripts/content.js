@@ -121,6 +121,23 @@ const PLATFORM_ADAPTERS = {
              document.querySelector('button[class*="send"]') ||
              document.querySelector('[class*="send"][role="button"]');
     }
+  },
+
+  grok: {
+    getInput() {
+      // Grok 2025 UI 用 Tiptap/ProseMirror contenteditable；旧版为 textarea
+      return document.querySelector('.ProseMirror[contenteditable="true"]') ||
+             document.querySelector('div[contenteditable="true"][role="textbox"]') ||
+             document.querySelector('textarea[aria-label*="Grok" i]') ||
+             document.querySelector('textarea') ||
+             document.querySelector('[contenteditable="true"]');
+    },
+    getSendButton() {
+      return document.querySelector('button[type="submit"]') ||
+             document.querySelector('button[aria-label*="Submit" i]') ||
+             document.querySelector('button[aria-label*="Send" i]') ||
+             document.querySelector('button[class*="send"]');
+    }
   }
 };
 
@@ -604,6 +621,7 @@ function detectCurrentPlatform() {
         (key === "deepseek" && url.includes("chat.deepseek.com")) ||
         (key === "kimi" && (url.includes("kimi.moonshot.cn") || url.includes("kimi.com"))) ||
         (key === "zai" && url.includes("chat.z.ai")) ||
+        (key === "grok" && url.includes("grok.com")) ||
         (key === "doubao" && url.includes("doubao.com"))) {
       return key;
     }

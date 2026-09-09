@@ -16,6 +16,7 @@
     "https://kimi.moonshot.cn/*",
     "https://www.kimi.com/*",
     "https://chat.z.ai/*",
+    "https://grok.com/*",
     "https://www.doubao.com/*",
     "https://doubao.com/*"
   ],
@@ -51,6 +52,7 @@
         "https://kimi.moonshot.cn/*",
         "https://www.kimi.com/*",
         "https://chat.z.ai/*",
+        "https://grok.com/*",
         "https://www.doubao.com/*",
         "https://doubao.com/*"
       ],
