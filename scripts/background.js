@@ -52,6 +52,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log("[Multi Chat BG] Content script ready:", request.url);
   }
 
+  if (request.action === "searchInTab") {
+    console.log(`[Multi Chat BG] searchInTab: tabId=${request.tabId}, platform=${request.platform}`);
+    handleSearchInTab(request.tabId, request.keyword, request.platform)
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "openAndSearch") {
+    console.log(`[Multi Chat BG] openAndSearch: platform=${request.platform}, url=${request.openUrl}`);
+    handleOpenAndSearch(request.keyword, request.platform, request.openUrl)
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   return false;
 });
 
@@ -140,6 +156,53 @@ async function handleOpenAndSend(message, platform, openUrl, manualSend) {
   }, 15000);
 
   return response;
+}
+
+// ============ 搜索历史：已打开标签页直接打开搜索框并填词 ============
+
+async function handleSearchInTab(tabId, keyword, platform) {
+  await ensureContentScriptInjected(tabId);
+
+  // 搜索需要用户看到结果，激活该标签页
+  try { await chrome.tabs.update(tabId, { active: true }); } catch { /* ignore */ }
+
+  return await sendMessageToTabWithTimeout(tabId, {
+    action: "openSearch",
+    keyword: keyword,
+    platform: platform
+  }, 15000);
+}
+
+// ============ 搜索历史：未打开则先开标签页，等就绪后打开搜索框并填词 ============
+
+async function handleOpenAndSearch(keyword, platform, openUrl) {
+  // 新建标签页并激活（搜索结果要给用户看）
+  const tab = await chrome.tabs.create({ url: openUrl, active: true });
+  const tabId = tab.id;
+
+  await waitForTabLoaded(tabId, 20000);
+  await wait(800);
+  await injectContentScript(tabId);
+
+  // 等 content script 就绪（支持该平台搜索即视为可用）
+  const deadline = Date.now() + 15000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    try {
+      const resp = await chrome.tabs.sendMessage(tabId, { action: "checkSearchReady", platform: platform });
+      if (resp && resp.ready) { ready = true; break; }
+    } catch { /* content script 还没就绪 */ }
+    await wait(300);
+  }
+  if (!ready) {
+    return { success: false, error: "页面已打开但未就绪（可能需要登录）", tabId: tabId };
+  }
+
+  return await sendMessageToTabWithTimeout(tabId, {
+    action: "openSearch",
+    keyword: keyword,
+    platform: platform
+  }, 15000);
 }
 
 // ============ 工具函数 ============

@@ -141,6 +141,197 @@ const PLATFORM_ADAPTERS = {
   }
 };
 
+// ============ 搜索历史对话适配 ============
+// 方案 a：打开各平台自带的"搜索历史对话"入口，并把关键词填进去，结果显示在各自页面。
+// 与发送逻辑完全独立。每个平台需要：
+//   openTrigger(): 点开搜索入口（侧栏搜索按钮），返回是否点到了；点不到时上层走快捷键兜底
+//   getSearchInput(): 返回搜索框元素（搜索面板弹出后才存在）
+//   shortcut: 打不开入口时的快捷键兜底（{ key, ctrl, shift, meta }）
+//
+// ponytail: 这些选择器依赖各平台登录态下的 SPA 结构，无法在本环境真机验证，改版即失效。
+// 每个平台都留了多重 fallback + 快捷键兜底 + 通用兜底（找页面上带"搜索/search"的输入框）。
+// 真机失效时，抓取该平台搜索面板的 HTML 来校准对应选择器即可。
+const SEARCH_ADAPTERS = {
+  gemini: {
+    // Gemini 侧栏"搜索"入口
+    openTrigger() {
+      return clickFirst([
+        'button[aria-label*="搜索" i]',
+        'button[aria-label*="Search" i]',
+        'button[data-test-id*="search" i]',
+        '[role="button"][aria-label*="Search" i]'
+      ]);
+    },
+    getSearchInput() {
+      return document.querySelector('input[aria-label*="搜索" i]') ||
+             document.querySelector('input[aria-label*="Search" i]') ||
+             document.querySelector('input[type="search"]') ||
+             document.querySelector('input[placeholder*="搜索" i]') ||
+             document.querySelector('input[placeholder*="Search" i]');
+    },
+    // 社区扩展显示 Gemini 搜索会话为 Ctrl+Shift+K（非官方，作兜底）
+    shortcut: { key: "k", ctrl: true, shift: true }
+  },
+
+  tongyi: {
+    // 新版 www.qianwen.com：搜索按钮是图标按钮，内含 <svg><use href="#qwpcicon-search2">。
+    // 真机确认图标名 qwpcicon-search2；搜索框为 input[placeholder="搜索"]。
+    // ponytail: 靠 svg use 的图标名（语义化，较稳）；换图标名即失效，届时重抓 use href 替换。
+    openTrigger() {
+      // 找图标名含 search 的 <use>（普通 href 或 xlink:href），遍历比 CSS 命名空间选择器稳
+      const use = [...document.querySelectorAll("use")].find(u => {
+        const h = u.getAttribute("href") || u.getAttribute("xlink:href") || "";
+        return /search/i.test(h);
+      });
+      // 从 use 往上找最近的可点击祖先（button / role=button），点它
+      let node = use;
+      while (node) {
+        if (node.tagName === "BUTTON" || node.getAttribute?.("role") === "button") {
+          node.click();
+          return true;
+        }
+        node = node.parentElement;
+      }
+      // 兜底：直接点 use 所在 svg 的父元素
+      const svgParent = use && use.closest("svg") && use.closest("svg").parentElement;
+      if (svgParent) { svgParent.click(); return true; }
+      return false;
+    },
+    getSearchInput() {
+      return document.querySelector('input[placeholder="搜索"]') ||
+             document.querySelector('input[placeholder*="搜索"]') ||
+             document.querySelector('input[type="search"]') ||
+             document.querySelector('input[placeholder*="Search" i]');
+    }
+  },
+
+  deepseek: {
+    // DeepSeek 侧栏搜索按钮是纯图标 div.ds-button，无 aria-label / 无稳定 class，
+    // 只能靠放大镜 svg 的 path 特征定位（真机确认 d 以 "M11.748" 开头）。
+    // ponytail: path 前缀是当前图标的形状指纹，DeepSeek 换图标即失效；
+    // 兜底策略：找不到指纹时，点顶部工具栏（top<80）里第一个带 svg 的 ds-button。
+    // 升级路径：失效时重新抓 path d 前缀替换 SEARCH_ICON_PREFIX。
+    openTrigger() {
+      const SEARCH_ICON_PREFIX = "M11.748";
+      const btns = [...document.querySelectorAll(".ds-button")].filter(
+        el => el.offsetParent !== null || el.offsetHeight > 0
+      );
+      // 1) 按放大镜图标 path 指纹精确匹配
+      let target = btns.find(el => {
+        const p = el.querySelector("path");
+        return p && (p.getAttribute("d") || "").startsWith(SEARCH_ICON_PREFIX);
+      });
+      // 2) 兜底：顶部工具栏最靠左上角、带 svg 图标的按钮
+      if (!target) {
+        target = btns
+          .filter(el => {
+            const r = el.getBoundingClientRect();
+            return r.top < 80 && el.querySelector("svg");
+          })
+          .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)[0];
+      }
+      if (target) { target.click(); return true; }
+      return false;
+    },
+    getSearchInput() {
+      // 真机确认：input[type=text] placeholder="搜索对话内容..."
+      return document.querySelector('input[placeholder*="搜索对话"]') ||
+             document.querySelector('input[placeholder*="搜索"]') ||
+             document.querySelector('input[type="search"]') ||
+             document.querySelector('input[placeholder*="Search" i]');
+    }
+  },
+
+  grok: {
+    // Grok 搜索历史入口（ChatGPT 风格，多为 Ctrl+K 命令面板）
+    openTrigger() {
+      return clickFirst([
+        'button[aria-label*="Search" i]',
+        'button[aria-label*="搜索" i]',
+        '[data-testid*="search" i]'
+      ]);
+    },
+    getSearchInput() {
+      return document.querySelector('input[type="search"]') ||
+             document.querySelector('input[placeholder*="Search" i]') ||
+             document.querySelector('input[placeholder*="搜索" i]') ||
+             document.querySelector('[role="dialog"] input[type="text"]');
+    },
+    shortcut: { key: "k", ctrl: true }
+  }
+};
+
+// 点击选择器列表里第一个存在且可见的元素，返回是否点到
+function clickFirst(selectors) {
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el && (el.offsetParent !== null || el.offsetHeight > 0)) {
+      el.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+// 派发快捷键（用于打不开搜索入口时的兜底）
+function pressShortcut(sc) {
+  const opts = {
+    key: sc.key,
+    code: "Key" + sc.key.toUpperCase(),
+    ctrlKey: !!sc.ctrl,
+    shiftKey: !!sc.shift,
+    metaKey: !!sc.meta,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window
+  };
+  for (const t of [document.activeElement || document.body, document]) {
+    t.dispatchEvent(new KeyboardEvent("keydown", opts));
+    t.dispatchEvent(new KeyboardEvent("keyup", opts));
+  }
+}
+
+// 在搜索框里填入关键词（复用发送逻辑的 simulateTyping / execCommand 策略）。
+async function fillSearchInput(input, keyword) {
+  input.focus();
+  await wait(80);
+  await clearInput(input);
+  await wait(50);
+  await simulateTyping(input, keyword);
+  await wait(200);
+}
+
+// 打开某平台的搜索历史入口并填入关键词。成功返回 true。
+// 流程：点搜索入口 →（点不到则按快捷键）→ 轮询等待搜索框出现 → 填词。
+async function openSearchAndFill(platform, keyword) {
+  const sa = SEARCH_ADAPTERS[platform];
+  if (!sa) throw new Error("该平台暂不支持搜索历史: " + platform);
+
+  // 1) 尝试点开搜索入口
+  let opened = false;
+  try { opened = sa.openTrigger(); } catch (e) { /* ignore */ }
+
+  // 2) 点不到就用快捷键兜底（若该平台配了快捷键）
+  if (!opened && sa.shortcut) {
+    pressShortcut(sa.shortcut);
+  }
+
+  // 3) 轮询等待搜索框出现（最多 4 秒），出现即填词
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline) {
+    const input = sa.getSearchInput();
+    if (input && (input.offsetParent !== null || input.offsetHeight > 0)) {
+      await fillSearchInput(input, keyword);
+      return true;
+    }
+    // 首轮没出现，若还没试过快捷键则再补一次
+    await wait(200);
+  }
+  throw new Error("未找到搜索框，可能平台改版或需登录");
+}
+
+
 // ============ 核心发送逻辑 ============
 
 // 通用：检测"停止生成"按钮（上一条还在生成时，发送按钮会变成停止按钮）。
@@ -172,7 +363,9 @@ async function stopIfGenerating() {
 
 // 检测"额度用完/需要升级"等阻止发送的提示。
 // 只在输入框附近区域检测，避免误伤用户消息内容里的相同词汇。
-// 返回提示文本（表示不可发送）或 null。
+// 返回 { notice, limitedUntil } （表示不可发送）或 null。
+//   notice: 展示给用户的提示文本
+//   limitedUntil: 限制解除的时间戳（ms）；解析不到重置时间时用兜底（now + 3h）
 function detectBlockingNotice(input) {
   if (!input) return null;
 
@@ -181,10 +374,22 @@ function detectBlockingNotice(input) {
     /免费额度.*用完/,
     /额度.*(已用完|用尽|耗尽)/,
     /消息.*(已用完|达到上限)/,
+    /聊天已暂停/,
+    /额度.*(将在|将于).*(重置|恢复)/,
     /out of (free )?(quota|credits|messages)/i,
     /usage limit reached/i,
     /you'?ve reached your.*(message |usage )?limit/i,
     /rate limit(ed)?/i
+  ];
+
+  // 强阻止信号：命中这些说明整个聊天被暂停（纯文本也发不出），
+  // 即使同区域出现"纯文本仍可用"字样也不豁免。ChatGPT 会同时显示
+  // "聊天已暂停…重置" + "请发起新的纯文本聊天"，但实际是发不出去的。
+  const hardBlockPatterns = [
+    /聊天已暂停/,
+    /额度.*(将在|将于).*(重置|恢复)/,
+    /chat.*paused/i,
+    /usage limit reached/i
   ];
 
   // "文本仍可用"的豁免词——命中这些说明只是部分功能受限（如 ChatGPT 的文件/图像/数据分析
@@ -192,6 +397,7 @@ function detectBlockingNotice(input) {
   const allowPatterns = [
     /仅使用文本/,
     /继续.*文本聊天/,
+    /纯文本聊天/,
     /可以继续/,
     /仍可.*(使用|聊天|发送)/,
     /continue.*(with )?text/i,
@@ -210,16 +416,52 @@ function detectBlockingNotice(input) {
     // 先看是否命中"完全不可发送"关键词
     const hitBlocking = blockingPatterns.find(re => re.test(text));
     if (hitBlocking) {
-      // 若同一区域还提示"文本仍可用"，则不算阻止（只是部分功能受限）
-      if (allowPatterns.some(re => re.test(text))) {
+      const hardBlocked = hardBlockPatterns.some(re => re.test(text));
+      // 仅当不是强阻止、且同区域提示"文本仍可用"时，才豁免（部分功能受限）
+      if (!hardBlocked && allowPatterns.some(re => re.test(text))) {
         console.log("[Multi Chat] 检测到额度提示，但文本仍可用，继续发送");
         return null;
       }
       const line = text.split("\n").find(l => hitBlocking.test(l)) || text.slice(0, 40);
-      return line.trim().slice(0, 60);
+      return {
+        notice: line.trim().slice(0, 60),
+        limitedUntil: parseResetTime(text)
+      };
     }
   }
   return null;
+}
+
+// 从限制提示文本里解析"额度重置时间"，返回时间戳（ms）。
+// 支持：绝对时间 "14:51 重置" / "resets at 3:00 PM"；相对时间 "2 小时后" / "in 2 hours"。
+// 解析不到时兜底为 now + 3 小时（ChatGPT 滚动窗口通常 3-4 小时）。
+// ponytail: 只覆盖已知的两种时间格式；出现新格式时走兜底，不会误判为不受限。
+function parseResetTime(text) {
+  const now = Date.now();
+  const FALLBACK = now + 3 * 60 * 60 * 1000;
+
+  // 1) 绝对时间 HH:MM（如 "14:51 重置"、"resets at 14:51"）
+  const hm = text.match(/(\d{1,2}):(\d{2})/);
+  if (hm) {
+    const h = parseInt(hm[1], 10);
+    const m = parseInt(hm[2], 10);
+    if (h <= 23 && m <= 59) {
+      const d = new Date();
+      d.setHours(h, m, 0, 0);
+      // 若该时刻已过（今天更早），说明是明天重置
+      if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+      return d.getTime();
+    }
+  }
+
+  // 2) 相对小时数（如 "2 小时后"、"in 2 hours"、"3 hrs"）
+  const rel = text.match(/(\d+)\s*(小时|hours?|hrs?)/i);
+  if (rel) {
+    const hours = parseInt(rel[1], 10);
+    if (hours > 0 && hours <= 168) return now + hours * 60 * 60 * 1000;
+  }
+
+  return FALLBACK;
 }
 
 async function fillAndSend(platform, message, onSent, manualSend) {
@@ -232,7 +474,9 @@ async function fillAndSend(platform, message, onSent, manualSend) {
   // 检测额度用完/需要升级等阻止发送的提示，命中则直接停止，不浪费时间尝试
   const blocking = detectBlockingNotice(input);
   if (blocking) {
-    throw new Error("无法发送：" + blocking);
+    const err = new Error("无法发送：" + blocking.notice);
+    err.limitedUntil = blocking.limitedUntil; // 带回限制解除时间，供排序用
+    throw err;
   }
 
   // 若上一条还在生成中（发送按钮变成了停止按钮），先停止再发送
@@ -603,6 +847,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (responded) return; // 已经回传过成功（发送动作已触发），忽略后续异常
         responded = true;
         console.error(`[Multi Chat] 发送失败: ${platform}`, err);
+        sendResponse({ success: false, error: err.message, limitedUntil: err.limitedUntil });
+      });
+
+    return true; // 异步响应
+  }
+
+  if (request.action === "checkSearchReady") {
+    // 检查该平台是否支持搜索（有适配即视为 content script 已就绪，可执行搜索）
+    const supported = !!SEARCH_ADAPTERS[request.platform];
+    sendResponse({ ready: supported });
+    return false;
+  }
+
+  if (request.action === "openSearch") {
+    const platform = request.platform;
+    const keyword = request.keyword;
+    console.log(`[Multi Chat] 收到搜索指令: platform=${platform}, keyword="${keyword}"`);
+
+    openSearchAndFill(platform, keyword)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => {
+        console.error(`[Multi Chat] 搜索失败: ${platform}`, err);
         sendResponse({ success: false, error: err.message });
       });
 

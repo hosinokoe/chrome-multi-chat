@@ -15,6 +15,12 @@
       </div>
     </header>
 
+    <!-- 模式切换：发送消息 / 搜索历史 -->
+    <div class="mode-switch">
+      <button id="mode-send" class="mode-tab active" data-mode="send">📨 群发消息</button>
+      <button id="mode-search" class="mode-tab" data-mode="search">🔍 搜索历史</button>
+    </div>
+
     <!-- 消息输入区 -->
     <div class="input-section">
       <textarea id="message" placeholder="输入要发送的消息..." rows="3"></textarea>
@@ -52,7 +58,10 @@
 
     <!-- 历史消息列表 -->
     <div class="history-section">
-      <h2>发送历史</h2>
+      <div class="history-header">
+        <h2>发送历史</h2>
+        <input type="search" id="history-search" class="history-search" placeholder="搜索历史…" autocomplete="off">
+      </div>
       <div id="history-list" class="history-list">
         <div class="empty">暂无发送记录</div>
       </div>

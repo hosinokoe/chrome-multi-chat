@@ -162,6 +162,39 @@ textarea {
   color: var(--text-primary);
 }
 
+/* 模式切换：群发消息 / 搜索历史 */
+.mode-switch {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px 0;
+  background: var(--bg-surface);
+}
+
+.mode-tab {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.mode-tab.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* 搜索模式下不支持搜索的平台：灰掉且不可选 */
+.tab-item.unsupported {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 textarea:focus {
   outline: none;
   border-color: var(--accent);
@@ -361,6 +394,16 @@ textarea:focus {
   flex-shrink: 0;
 }
 
+.platform-status-limited {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #fce8b2;
+  color: #8a5a00;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .tab-mode-open {
   font-size: 11px;
   padding: 2px 6px;
@@ -410,6 +453,41 @@ textarea:focus {
   border-bottom: 1px solid var(--border-color);
 }
 
+.history-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--bg-muted);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.history-header h2 {
+  padding: 0;
+  border: none;
+  background: none;
+  flex-shrink: 0;
+}
+
+.history-search {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border-input);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  transition: border-color 0.2s;
+}
+
+.history-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
 .history-list {
   flex: 1;
   overflow-y: auto;
@@ -434,6 +512,16 @@ textarea:focus {
   font-size: 11px;
   color: var(--text-muted);
   margin-bottom: 4px;
+}
+
+.msg-kind {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg-muted);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .history-item .msg-content {

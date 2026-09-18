@@ -16,18 +16,31 @@ const PLATFORMS = {
 // "默认"勾选时排除的平台（Claude/Kimi）
 const DEFAULT_UNCHECKED = ["claude", "kimi"];
 
+// 支持"搜索历史对话"的平台（与 content.js SEARCH_ADAPTERS 保持一致）
+const SEARCH_SUPPORTED = ["gemini", "tongyi", "deepseek", "grok"];
+
+// 当前模式："send"（群发消息）| "search"（搜索历史）
+let currentMode = "send";
+
 const HISTORY_KEY = "multiChatHistory";
 const MODE_KEY = "multiChatModes";
 const THEME_KEY = "multiChatTheme";
+const LIMITS_KEY = "multiChatLimits"; // { [platformKey]: limitedUntil(ms) }
 const MAX_HISTORY = 100;
+
+// 平台限制状态：{ platformKey: limitedUntil(ms) }，到期自动清除
+let platformLimits = {};
 
 // 每个平台的展示项：已打开的带 tab 信息，未打开的 tab 为 null
 let platformList = []; // [{ key, name, newChatUrl, tab: {id,title,favIconUrl} | null }]
 let tabModes = {}; // { tabId: "new" | "continue" }
+let historyCache = []; // 完整历史（未过滤），供搜索复用
+let historyQuery = ""; // 当前历史搜索关键词（小写）
 
 document.addEventListener("DOMContentLoaded", async () => {
   await loadTheme();
   await loadModes();
+  await loadLimits();
   await detectPlatforms();
   await loadHistory();
   setupEventListeners();
@@ -67,6 +80,44 @@ async function loadModes() {
 
 async function saveModes() {
   await chrome.storage.local.set({ [MODE_KEY]: tabModes });
+}
+
+// ============ 限制状态管理 ============
+
+// 载入限制状态，顺便清理已到期的
+async function loadLimits() {
+  const data = await chrome.storage.local.get(LIMITS_KEY);
+  platformLimits = data[LIMITS_KEY] || {};
+  purgeExpiredLimits();
+}
+
+// 清除已到期（limitedUntil <= now）的限制记录，返回是否有变化
+function purgeExpiredLimits() {
+  const now = Date.now();
+  let changed = false;
+  for (const key of Object.keys(platformLimits)) {
+    if (!platformLimits[key] || platformLimits[key] <= now) {
+      delete platformLimits[key];
+      changed = true;
+    }
+  }
+  if (changed) chrome.storage.local.set({ [LIMITS_KEY]: platformLimits });
+  return changed;
+}
+
+// 记录某平台被限制到 limitedUntil；成功发送时传 null 解除限制
+function setPlatformLimit(platformKey, limitedUntil) {
+  if (limitedUntil && limitedUntil > Date.now()) {
+    platformLimits[platformKey] = limitedUntil;
+  } else {
+    delete platformLimits[platformKey];
+  }
+  chrome.storage.local.set({ [LIMITS_KEY]: platformLimits });
+}
+
+function isLimited(platformKey) {
+  const until = platformLimits[platformKey];
+  return !!(until && until > Date.now());
 }
 
 function getTabMode(tabId) {
@@ -119,6 +170,16 @@ async function detectPlatforms() {
       };
     });
 
+    // 先清掉过期限制，再排序：正常平台 → 被限制平台 → Claude/Kimi（永远最后）。
+    // 各档内保持原始顺序（稳定排序）。
+    purgeExpiredLimits();
+    const rank = (p) => {
+      if (DEFAULT_UNCHECKED.includes(p.key)) return 2; // Claude/Kimi 固定最后
+      if (isLimited(p.key)) return 1;                  // 额度受限，排到正常之后
+      return 0;                                        // 正常
+    };
+    platformList.sort((a, b) => rank(a) - rank(b));
+
     renderPlatformList(tabListEl);
     updateTargetCount();
   } catch (err) {
@@ -144,11 +205,20 @@ function renderPlatformList(container) {
     const isOpen = !!p.tab;
     const mode = isOpen ? getTabMode(p.tab.id) : null;
 
-    // 初始默认勾选：已打开的平台
-    const checked = isOpen ? "checked" : "";
+    // 搜索模式下：不支持搜索的平台灰掉且不勾选
+    const unsupported = currentMode === "search" && !SEARCH_SUPPORTED.includes(p.key);
+
+    // 初始默认勾选：已打开的平台（搜索模式下不支持的平台不勾）
+    const checked = (isOpen && !unsupported) ? "checked" : "";
     const statusBadge = isOpen
       ? ""
       : `<span class="platform-status-closed">未打开</span>`;
+
+    // 额度受限徽标：显示恢复时间（如 14:51 恢复）
+    const limited = isLimited(p.key);
+    const limitBadge = limited
+      ? `<span class="platform-status-limited">${formatResetTime(platformLimits[p.key])} 恢复</span>`
+      : "";
 
     // 已打开显示模式下拉；未打开显示固定的"打开并发送"标记
     const modeControl = isOpen
@@ -163,11 +233,12 @@ function renderPlatformList(container) {
       : `<span class="platform-icon-placeholder">💬</span>`;
 
     return `
-    <label class="tab-item ${isOpen ? "" : "tab-item-closed"}">
-      <input type="checkbox" data-index="${index}" ${checked}>
+    <label class="tab-item ${isOpen ? "" : "tab-item-closed"} ${unsupported ? "unsupported" : ""}">
+      <input type="checkbox" data-index="${index}" ${checked} ${unsupported ? "disabled" : ""}>
       ${iconHtml}
       <span class="tab-title" title="${isOpen ? p.tab.title : p.name}">${p.name}</span>
       ${statusBadge}
+      ${limitBadge}
       ${modeControl}
     </label>
   `}).join("");
@@ -229,22 +300,34 @@ function setupEventListeners() {
     }
   });
 
-  // 发送
-  document.getElementById("send-btn").addEventListener("click", sendMessage);
+  // 模式切换：群发消息 / 搜索历史
+  document.querySelectorAll(".mode-tab").forEach(btn => {
+    btn.addEventListener("click", () => switchMode(btn.dataset.mode));
+  });
 
-  // Ctrl+Enter 发送
+  // 发送 / 搜索（按当前模式分派）
+  document.getElementById("send-btn").addEventListener("click", handlePrimaryAction);
+
+  // Ctrl+Enter 触发
   document.getElementById("message").addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
-      sendMessage();
+      handlePrimaryAction();
     }
+  });
+
+  // 历史搜索：输入即过滤（关键词匹配消息内容或平台名）
+  document.getElementById("history-search").addEventListener("input", (e) => {
+    historyQuery = e.target.value.trim().toLowerCase();
+    refreshHistoryView();
   });
 
   // 清空历史
   document.getElementById("clear-history").addEventListener("click", async () => {
     if (confirm("确定清空所有发送历史？")) {
       await chrome.storage.local.set({ [HISTORY_KEY]: [] });
-      renderHistory([]);
+      historyCache = [];
+      refreshHistoryView();
     }
   });
 }
@@ -305,11 +388,19 @@ async function sendToOnePlatform(p, message) {
 
     console.log(`[Multi Chat] 响应:`, response);
 
+    const success = !!(response && response.success);
+    // 成功 → 解除限制；因额度受限失败（响应带 limitedUntil）→ 记录限制时间
+    if (success) {
+      setPlatformLimit(p.key, null);
+    } else if (response && response.limitedUntil) {
+      setPlatformLimit(p.key, response.limitedUntil);
+    }
+
     return {
       platform: p.name,
       platformKey: p.key,
       mode: mode,
-      success: response && response.success,
+      success: success,
       manualSend: !!(response && response.manualSend),
       error: response?.error || ((!response || !response.success) ? "未收到成功响应" : null)
     };
@@ -366,11 +457,8 @@ async function sendMessage() {
   sendBtn.disabled = false;
   sendBtn.textContent = "发送";
 
-  // 有新打开的平台，刷新列表让它们变成"已打开"状态
-  const hadClosedTargets = selectedIndices.some(i => !platformList[i].tab);
-  if (hadClosedTargets) {
-    await detectPlatforms();
-  }
+  // 发送后刷新列表：新打开的平台变"已打开"，受限平台按新排序下移
+  await detectPlatforms();
 
   // 保存到历史
   const historyItem = {
@@ -399,12 +487,151 @@ async function sendMessage() {
   messageEl.focus();
 }
 
+// ============ 模式切换 & 搜索历史 ============
+
+// 切换群发/搜索模式，更新 UI 文案并重渲染平台列表（搜索模式灰掉不支持的平台）
+function switchMode(mode) {
+  if (mode === currentMode) return;
+  currentMode = mode;
+
+  document.querySelectorAll(".mode-tab").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.mode === mode);
+  });
+
+  const messageEl = document.getElementById("message");
+  const sendBtn = document.getElementById("send-btn");
+  if (mode === "search") {
+    messageEl.placeholder = "输入关键词，在选中平台里搜索历史对话…";
+    sendBtn.textContent = "搜索";
+  } else {
+    messageEl.placeholder = "输入要发送的消息...";
+    sendBtn.textContent = "发送";
+  }
+
+  // 重渲染平台列表以应用/取消"不支持搜索"的灰态
+  renderPlatformList(document.getElementById("tab-list"));
+  updateTargetCount();
+}
+
+// 主按钮分派：按当前模式走群发或搜索
+function handlePrimaryAction() {
+  if (currentMode === "search") {
+    searchHistory();
+  } else {
+    sendMessage();
+  }
+}
+
+// 向单个平台发起历史搜索。已打开→直接搜；未打开→先开标签页再搜。
+async function searchOnePlatform(p, keyword) {
+  let isOpen = !!p.tab;
+  if (isOpen) {
+    try {
+      await chrome.tabs.get(p.tab.id);
+    } catch {
+      isOpen = false; // 标签页已失效，降级为新开
+    }
+  }
+
+  try {
+    const response = isOpen
+      ? await chrome.runtime.sendMessage({
+          action: "searchInTab", tabId: p.tab.id, keyword, platform: p.key
+        })
+      : await chrome.runtime.sendMessage({
+          action: "openAndSearch", keyword, platform: p.key, openUrl: p.newChatUrl
+        });
+
+    return {
+      platform: p.name,
+      platformKey: p.key,
+      success: !!(response && response.success),
+      error: response?.error || ((!response || !response.success) ? "未收到成功响应" : null)
+    };
+  } catch (err) {
+    return { platform: p.name, platformKey: p.key, success: false, error: err.message || "通信失败" };
+  }
+}
+
+// 搜索历史：把关键词群发到选中平台，各平台打开自己的搜索框并填入。
+async function searchHistory() {
+  const messageEl = document.getElementById("message");
+  const sendBtn = document.getElementById("send-btn");
+  const keyword = messageEl.value.trim();
+
+  if (!keyword) {
+    showToast("请输入搜索关键词", "error");
+    return;
+  }
+
+  const checkboxes = document.querySelectorAll("#tab-list input[type='checkbox']:checked");
+  const indices = Array.from(checkboxes)
+    .map(cb => parseInt(cb.dataset.index))
+    .filter(i => SEARCH_SUPPORTED.includes(platformList[i].key)); // 只搜支持的平台
+
+  if (indices.length === 0) {
+    showToast("请至少选择一个支持搜索的平台", "error");
+    return;
+  }
+
+  sendBtn.disabled = true;
+  const total = indices.length;
+  let completed = 0;
+  sendBtn.textContent = `搜索中 (0/${total})`;
+
+  const tasks = indices.map(async (index) => {
+    const result = await searchOnePlatform(platformList[index], keyword);
+    completed++;
+    sendBtn.textContent = `搜索中 (${completed}/${total})`;
+    return result;
+  });
+
+  const results = await Promise.all(tasks);
+
+  sendBtn.disabled = false;
+  sendBtn.textContent = "搜索";
+  await detectPlatforms();
+
+  // 存入历史（kind=search，复用发送历史的渲染与重试）
+  await saveToHistory({
+    id: Date.now(),
+    kind: "search",
+    time: new Date().toLocaleString("zh-CN"),
+    message: keyword,
+    results: results
+  });
+  document.getElementById("history-list").scrollTop = 0;
+
+  const successCount = results.filter(r => r.success).length;
+  const failed = results.filter(r => !r.success);
+  if (successCount === total) {
+    showToast(`已在 ${total} 个平台打开搜索`, "success");
+  } else {
+    const detail = failed.map(f => `${f.platform}: ${f.error}`).join("；");
+    showToast(`${successCount}/${total} 成功。${detail}`, successCount > 0 ? "success" : "error");
+  }
+}
+
 // ============ 历史记录 ============
 
 async function loadHistory() {
   const data = await chrome.storage.local.get(HISTORY_KEY);
-  const history = data[HISTORY_KEY] || [];
-  renderHistory(history);
+  historyCache = data[HISTORY_KEY] || [];
+  refreshHistoryView();
+}
+
+// 按当前搜索关键词过滤缓存并渲染。关键词匹配消息内容或平台名（大小写不敏感）。
+function refreshHistoryView() {
+  if (!historyQuery) {
+    renderHistory(historyCache);
+    return;
+  }
+  const q = historyQuery;
+  const filtered = historyCache.filter(item =>
+    item.message.toLowerCase().includes(q) ||
+    item.results.some(r => (r.platform || "").toLowerCase().includes(q))
+  );
+  renderHistory(filtered, historyCache.length > 0 && filtered.length === 0);
 }
 
 async function saveToHistory(item) {
@@ -418,20 +645,25 @@ async function saveToHistory(item) {
   }
 
   await chrome.storage.local.set({ [HISTORY_KEY]: history });
-  renderHistory(history);
+  historyCache = history;
+  refreshHistoryView();
 }
 
-function renderHistory(history) {
+function renderHistory(history, noMatch = false) {
   const container = document.getElementById("history-list");
 
   if (history.length === 0) {
-    container.innerHTML = `<div class="empty">暂无发送记录</div>`;
+    container.innerHTML = `<div class="empty">${noMatch ? "没有匹配的记录" : "暂无发送记录"}</div>`;
     return;
   }
 
-  container.innerHTML = history.map(item => `
+  container.innerHTML = history.map(item => {
+    const isSearch = item.kind === "search";
+    const kindBadge = isSearch ? `<span class="msg-kind">🔍 搜索</span>` : "";
+    const retryText = isSearch ? "↻ 重搜" : "↻ 重试";
+    return `
     <div class="history-item" data-id="${item.id}">
-      <div class="msg-time">${item.time}</div>
+      <div class="msg-time">${kindBadge}${item.time}</div>
       <div class="msg-content">${escapeHtml(item.message)}</div>
       <div class="msg-targets">
         ${item.results.map((r, ri) => {
@@ -442,12 +674,12 @@ function renderHistory(history) {
           // 失败项：渲染为可点击的重试按钮
           return `<span class="msg-target fail retryable" title="点击重试 · ${r.error || ''}"
                         data-retry-id="${item.id}" data-retry-index="${ri}">
-                    ${label} <span class="retry-icon">↻ 重试</span>
+                    ${label} <span class="retry-icon">${retryText}</span>
                   </span>`;
         }).join("")}
       </div>
     </div>
-  `).join("");
+  `}).join("");
 
   // 重试按钮：点击重新发送该失败的平台
   container.querySelectorAll(".msg-target.retryable").forEach(el => {
@@ -465,6 +697,7 @@ function renderHistory(history) {
       const id = parseInt(el.dataset.id);
       const item = history.find(h => h.id === id);
       if (item) {
+        switchMode(item.kind === "search" ? "search" : "send");
         document.getElementById("message").value = item.message;
         document.getElementById("message").focus();
       }
@@ -493,21 +726,25 @@ async function retryOne(historyId, resultIndex, btnEl) {
   // 按钮进入"重试中"状态
   btnEl.classList.add("retrying");
   const iconEl = btnEl.querySelector(".retry-icon");
-  const originalIcon = iconEl ? iconEl.textContent : "";
-  if (iconEl) iconEl.textContent = "发送中…";
+  const isSearch = item.kind === "search";
+  if (iconEl) iconEl.textContent = isSearch ? "搜索中…" : "发送中…";
 
-  const result = await sendToOnePlatform(p, item.message);
+  // 按记录类型分派：搜索历史走搜索，普通消息走发送
+  const result = isSearch
+    ? await searchOnePlatform(p, item.message)
+    : await sendToOnePlatform(p, item.message);
 
   // 更新该条历史记录的对应结果
   item.results[resultIndex] = result;
   await chrome.storage.local.set({ [HISTORY_KEY]: history });
+  historyCache = history;
 
   // 重新渲染历史并提示
-  renderHistory(history);
+  refreshHistoryView();
   if (result.success) {
-    showToast(`${result.platform} 重试成功`, "success");
+    showToast(`${result.platform} ${isSearch ? "重搜成功" : "重试成功"}`, "success");
   } else {
-    showToast(`${result.platform} 重试失败: ${result.error}`, "error");
+    showToast(`${result.platform} ${isSearch ? "重搜" : "重试"}失败: ${result.error}`, "error");
   }
 }
 
@@ -517,6 +754,16 @@ function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+// 把限制解除时间戳格式化为 HH:MM（跨天则加"明日"）
+function formatResetTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const hhmm = d.toTimeString().slice(0, 5);
+  const now = new Date();
+  const crossDay = d.getDate() !== now.getDate() || d.getMonth() !== now.getMonth();
+  return crossDay ? `明日 ${hhmm}` : hhmm;
 }
 
 function showToast(text, type = "") {
