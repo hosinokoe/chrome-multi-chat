@@ -68,6 +68,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === "collectFromTab") {
+    console.log(`[Multi Chat BG] collectFromTab: tabId=${request.tabId}, platform=${request.platform}`);
+    handleCollectFromTab(request.tabId, request.platform)
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   return false;
 });
 
@@ -205,8 +213,18 @@ async function handleOpenAndSearch(keyword, platform, openUrl) {
   }, 15000);
 }
 
-// ============ 工具函数 ============
+// ============ 收集回答：向已打开标签页请求抓取本轮 AI 回答 ============
+// 发送流程结束后调用。content 侧会先等生成结束再抓取，故超时给足（95s）。
+async function handleCollectFromTab(tabId, platform) {
+  await ensureContentScriptInjected(tabId);
+  return await sendMessageToTabWithTimeout(tabId, {
+    action: "collectAnswer",
+    platform: platform,
+    timeout: 90000
+  }, 95000);
+}
 
+// ============ 工具函数 ============
 // 等待标签页加载完成
 function waitForTabLoaded(tabId, timeout) {
   return new Promise((resolve, reject) => {

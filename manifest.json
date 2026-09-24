@@ -3,7 +3,7 @@
   "name": "Multi Chat Sender",
   "version": "1.1.0",
   "description": "一次性向多个在线聊天标签页发送相同消息（侧边栏版）",
-  "permissions": ["activeTab", "tabs", "scripting", "sidePanel", "storage"],
+  "permissions": ["activeTab", "tabs", "scripting", "sidePanel", "storage", "downloads"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",

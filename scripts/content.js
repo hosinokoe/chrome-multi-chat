@@ -261,6 +261,119 @@ const SEARCH_ADAPTERS = {
   }
 };
 
+// ============ 收集回答适配 ============
+// 目标：发送后等各平台生成结束，抓取"最后一条 AI 回答"的纯文本，聚合到剪贴板供终端侧总结。
+// 与发送/搜索逻辑完全独立，新增分支不改动已有代码。
+//
+// 每个平台提供 getTurns()：返回页面上所有"AI 回答"消息容器的数组（按出现顺序），
+// 取最后一个即为本轮回答。抓文本用 innerText（保留换行，够总结用）。
+//
+// ponytail: 这些选择器依赖各平台登录态下的 SPA 结构，无法在本环境真机验证，改版即失效。
+// 每个平台留了多重 fallback；真机失效时抓取该平台回答气泡的 HTML 来校准 selector 即可。
+// 已知上限：只抓最后一条、纯文本（丢失代码块语言标记/表格结构），够横向总结用；
+// 需要富格式时升级为按平台解析 markdown 容器。
+const ANSWER_ADAPTERS = {
+  gemini: {
+    getTurns() {
+      // Gemini 回答在 <model-response> / message-content 内
+      return sel([
+        "model-response .markdown",
+        "message-content .markdown",
+        ".model-response-text",
+        "model-response"
+      ]);
+    }
+  },
+  deepseek: {
+    getTurns() {
+      // DeepSeek 回答气泡带 ds-markdown class；用户消息不带
+      return sel([
+        ".ds-markdown",
+        "div[class*='_4f9bf79'] .ds-markdown",
+        "div[class*='markdown']"
+      ]);
+    }
+  },
+  grok: {
+    getTurns() {
+      // Grok 回答为 message-bubble；AI/用户共用类，靠 items-start 区分助手侧
+      return sel([
+        ".message-bubble .response-content-markdown",
+        ".items-start .message-bubble",
+        ".response-content-markdown",
+        ".message-bubble"
+      ]);
+    }
+  },
+  doubao: {
+    getTurns() {
+      // 豆包回答容器带 receive/message-content 语义；用户消息为 send
+      return sel([
+        "[data-testid='receive_message'] [data-testid='message_text_content']",
+        "[data-testid='message_text_content']",
+        "div[class*='receive'] div[class*='markdown']",
+        "div[class*='message-content']"
+      ]);
+    }
+  }
+};
+
+// 返回第一个能选到 ≥1 个可见元素的选择器的元素数组（多重 fallback）
+function sel(selectors) {
+  for (const s of selectors) {
+    const nodes = [...document.querySelectorAll(s)].filter(
+      el => el.offsetParent !== null || el.offsetHeight > 0
+    );
+    if (nodes.length) return nodes;
+  }
+  return [];
+}
+
+// 抓取当前平台最后一条 AI 回答的纯文本。
+// 流程：先等生成结束（停止按钮消失 + 文本稳定），再取最后一个回答容器的 innerText。
+async function collectAnswer(platform, timeout = 90000) {
+  const aa = ANSWER_ADAPTERS[platform];
+  if (!aa) throw new Error("该平台暂不支持收集回答: " + platform);
+
+  await waitForGenerationDone(platform, timeout);
+
+  const turns = aa.getTurns();
+  if (!turns.length) throw new Error("未找到回答内容（可能平台改版或未登录）");
+  const text = (turns[turns.length - 1].innerText || "").trim();
+  if (!text) throw new Error("回答内容为空");
+  return text;
+}
+
+// 等待生成结束：先等停止按钮出现过又消失（流式完成），再等回答文本连续稳定。
+// 兜底：即使从没检测到停止按钮，也会走文本稳定判定（有些平台停止按钮选择器抓不到）。
+async function waitForGenerationDone(platform, timeout) {
+  const aa = ANSWER_ADAPTERS[platform];
+  const deadline = Date.now() + timeout;
+
+  // 阶段1：给生成一点启动时间，若出现停止按钮则等它消失
+  await wait(500);
+  while (Date.now() < deadline && getStopButton()) {
+    await wait(400);
+  }
+
+  // 阶段2：文本稳定判定——连续 3 次(约1.2s)取到的最后一条回答文本不变，视为定稿
+  let last = null;
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    if (getStopButton()) { stableCount = 0; await wait(400); continue; }
+    const turns = aa.getTurns();
+    const cur = turns.length ? (turns[turns.length - 1].innerText || "") : "";
+    if (cur && cur === last) {
+      if (++stableCount >= 3) return;
+    } else {
+      stableCount = 0;
+      last = cur;
+    }
+    await wait(400);
+  }
+  // 超时也返回，让 collectAnswer 用当前能抓到的内容兜底
+}
+
 // 点击选择器列表里第一个存在且可见的元素，返回是否点到
 function clickFirst(selectors) {
   for (const sel of selectors) {
@@ -869,6 +982,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .then(() => sendResponse({ success: true }))
       .catch(err => {
         console.error(`[Multi Chat] 搜索失败: ${platform}`, err);
+        sendResponse({ success: false, error: err.message });
+      });
+
+    return true; // 异步响应
+  }
+
+  if (request.action === "checkAnswerReady") {
+    // 收集回答就绪判定：有该平台适配即视为 content script 可执行收集
+    sendResponse({ ready: !!ANSWER_ADAPTERS[request.platform] });
+    return false;
+  }
+
+  if (request.action === "collectAnswer") {
+    const platform = request.platform;
+    console.log(`[Multi Chat] 收到收集回答指令: platform=${platform}`);
+
+    collectAnswer(platform, request.timeout)
+      .then(text => sendResponse({ success: true, answer: text }))
+      .catch(err => {
+        console.error(`[Multi Chat] 收集回答失败: ${platform}`, err);
         sendResponse({ success: false, error: err.message });
       });
 

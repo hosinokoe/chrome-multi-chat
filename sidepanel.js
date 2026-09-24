@@ -19,6 +19,13 @@ const DEFAULT_UNCHECKED = ["claude", "kimi"];
 // 支持"搜索历史对话"的平台（与 content.js SEARCH_ADAPTERS 保持一致）
 const SEARCH_SUPPORTED = ["gemini", "tongyi", "deepseek", "grok"];
 
+// 支持"收集回答"的平台（与 content.js ANSWER_ADAPTERS 保持一致）
+const COLLECT_SUPPORTED = ["gemini", "deepseek", "grok", "doubao"];
+
+// "收集回答"开关：由统一设置选「收集回答」时置 true。为 true 时发送后抓取各平台回答聚合到剪贴板。
+// 独立于 tabModes（收集时各平台按"继续对话"方式发送），避免污染 per-tab 的 continue/new 状态。
+let collectMode = false;
+
 // 当前模式："send"（群发消息）| "search"（搜索历史）
 let currentMode = "send";
 
@@ -130,6 +137,21 @@ function setTabMode(tabId, mode) {
 }
 
 function setAllModes(mode) {
+  // "收集回答"是顶层开关，不作为 per-tab mode（收集时各平台按继续对话发送）
+  if (mode === "collect") {
+    collectMode = true;
+    for (const p of platformList) {
+      if (p.tab) tabModes[p.tab.id] = "continue";
+    }
+    saveModes();
+    document.querySelectorAll(".tab-mode").forEach(select => {
+      select.value = "continue";
+      select.className = "tab-mode mode-continue";
+    });
+    return;
+  }
+
+  collectMode = false;
   for (const p of platformList) {
     if (p.tab) {
       tabModes[p.tab.id] = mode;
@@ -251,6 +273,12 @@ function renderPlatformList(container) {
       const mode = select.value;
       setTabMode(tabId, mode);
       select.className = `tab-mode mode-${mode}`;
+      // 手动调 per-tab 模式即退出"收集回答"，同步复位统一设置显示
+      if (collectMode) {
+        collectMode = false;
+        const gm = document.getElementById("global-mode");
+        if (gm && gm.value === "collect") gm.value = mode;
+      }
     });
     select.addEventListener("click", (e) => e.stopPropagation());
   });
@@ -454,6 +482,12 @@ async function sendMessage() {
   // 等待所有任务完成（并行执行）
   const results = await Promise.all(tasks);
 
+  // 收集回答模式：发送成功后，等各平台答完并抓取回答，聚合写入剪贴板
+  let collected = null;
+  if (collectMode) {
+    collected = await collectAnswers(selectedIndices, results, message, sendBtn);
+  }
+
   sendBtn.disabled = false;
   sendBtn.textContent = "发送";
 
@@ -465,7 +499,8 @@ async function sendMessage() {
     id: Date.now(),
     time: new Date().toLocaleString("zh-CN"),
     message: message,
-    results: results
+    results: results,
+    collected: collected  // 收集回答模式下为聚合文本，否则 null
   };
 
   await saveToHistory(historyItem);
@@ -476,7 +511,9 @@ async function sendMessage() {
   // 显示结果
   const successCount = results.filter(r => r.success).length;
 
-  if (successCount === total) {
+  if (collected) {
+    showToast(`已收集 ${collected.count} 份回答，已下载到 Downloads/kiro`, collected.count > 0 ? "success" : "error");
+  } else if (successCount === total) {
     showToast(`全部发送成功 (${total}/${total})`, "success");
   } else {
     showToast(`${successCount}/${total} 成功`, successCount > 0 ? "success" : "error");
@@ -485,6 +522,93 @@ async function sendMessage() {
   // 清空输入框
   messageEl.value = "";
   messageEl.focus();
+}
+
+// ============ 收集回答 ============
+
+// 收集各平台本轮回答，聚合成一份文本写入剪贴板供终端侧（Kiro）总结。
+// 只对：发送成功 + 支持收集 + 已打开 的平台发起收集。各平台并行等待生成结束后抓取。
+// 返回 { count, text }：count=成功抓到的份数，text=聚合文本（也已写入剪贴板）。
+async function collectAnswers(selectedIndices, results, message, sendBtn) {
+  // 用 platformKey 关联发送结果，筛出可收集的目标
+  const resultByKey = {};
+  for (const r of results) resultByKey[r.platformKey] = r;
+
+  const targets = selectedIndices
+    .map(i => platformList[i])
+    .filter(p => p && p.tab
+      && COLLECT_SUPPORTED.includes(p.key)
+      && resultByKey[p.key] && resultByKey[p.key].success);
+
+  if (!targets.length) {
+    // 没有可收集的平台：仍写入一份说明，避免用户以为卡住
+    return { count: 0, text: "" };
+  }
+
+  sendBtn.textContent = `收集回答中 (0/${targets.length})`;
+  let done = 0;
+
+  const collectTasks = targets.map(async (p) => {
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        action: "collectFromTab",
+        tabId: p.tab.id,
+        platform: p.key
+      });
+      done++;
+      sendBtn.textContent = `收集回答中 (${done}/${targets.length})`;
+      return {
+        platform: p.name,
+        success: !!(resp && resp.success),
+        answer: resp && resp.answer ? resp.answer : "",
+        error: resp?.error || null
+      };
+    } catch (err) {
+      done++;
+      sendBtn.textContent = `收集回答中 (${done}/${targets.length})`;
+      return { platform: p.name, success: false, answer: "", error: err.message || "通信失败" };
+    }
+  });
+
+  const answers = await Promise.all(collectTasks);
+  const ok = answers.filter(a => a.success && a.answer);
+
+  // 聚合成分段文本：问题 + 各平台回答，供终端侧直接读剪贴板总结
+  const parts = [`【问题】\n${message}\n`];
+  for (const a of answers) {
+    parts.push(`\n=== ${a.platform} ===\n${a.success && a.answer ? a.answer : `（未收集到：${a.error || "无回答"}）`}`);
+  }
+  const text = parts.join("\n");
+
+  // 落地：下载成文件到下载目录（不受剪贴板焦点限制，且留存历史，供终端侧读取总结）
+  downloadText(text);
+
+  return { count: ok.length, text: text };
+}
+
+// 把文本下载成 .txt 到下载目录的 kiro/ 子文件夹，供终端侧读取总结。
+// 用 chrome.downloads.download（支持相对子目录，需 downloads 权限）。
+// 文件名带时间戳，避免覆盖，便于终端侧按最新文件读取。
+function downloadText(text) {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    chrome.downloads.download({
+      url: url,
+      filename: `kiro/multichat-answers-${stamp}.txt`,  // 相对下载目录，落到 Downloads/kiro/
+      saveAs: false,
+      conflictAction: "uniquify"
+    }, () => {
+      // 回收 blob URL（下载已接管数据）
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      if (chrome.runtime.lastError) {
+        console.error("[Multi Chat] 下载回答文件失败:", chrome.runtime.lastError.message);
+      }
+    });
+  } catch (err) {
+    console.error("[Multi Chat] 下载回答文件失败:", err);
+  }
 }
 
 // ============ 模式切换 & 搜索历史 ============
