@@ -580,32 +580,41 @@ async function collectAnswers(selectedIndices, results, message, sendBtn) {
   }
   const text = parts.join("\n");
 
-  // 落地：下载成文件到下载目录（不受剪贴板焦点限制，且留存历史，供终端侧读取总结）
+  // 落地1（稳）：写入 chrome.storage.local，不受下载设置/焦点/filename 限制，一定成功。
+  // 终端侧可从扩展存储导出读取，作为下载不可靠时的兜底。
+  try {
+    await chrome.storage.local.set({
+      latestCollected: { time: new Date().toISOString(), message: message, text: text, count: ok.length }
+    });
+  } catch (err) {
+    console.error("[Multi Chat] 写入 storage 失败:", err);
+  }
+
+  // 落地2（便捷）：下载成文件到 kiro/（受浏览器下载设置影响，可能落到默认位置）
   downloadText(text);
 
   return { count: ok.length, text: text };
 }
 
 // 把文本下载成 .txt 到下载目录的 kiro/ 子文件夹，供终端侧读取总结。
-// 用 chrome.downloads.download（支持相对子目录，需 downloads 权限）。
-// 文件名带时间戳，避免覆盖，便于终端侧按最新文件读取。
+// 委托 background（service worker）发起下载：sidepanel 页面上下文调用
+// chrome.downloads.download 会忽略 filename（落到 Downloads 根目录、名为"下载.txt"），
+// 由 service worker 发起才能让 filename + kiro/ 子目录生效。
+// 用 data: URL（中文先 UTF-8 再 base64；SW 里无 URL.createObjectURL）。
 function downloadText(text) {
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    chrome.downloads.download({
-      url: url,
-      filename: `kiro/multichat-answers-${stamp}.txt`,  // 相对下载目录，落到 Downloads/kiro/
-      saveAs: false,
-      conflictAction: "uniquify"
-    }, () => {
-      // 回收 blob URL（下载已接管数据）
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-      if (chrome.runtime.lastError) {
-        console.error("[Multi Chat] 下载回答文件失败:", chrome.runtime.lastError.message);
+    const b64 = btoa(unescape(encodeURIComponent(text)));
+    const dataUrl = `data:text/plain;charset=utf-8;base64,${b64}`;
+    chrome.runtime.sendMessage({
+      action: "downloadAnswers",
+      dataUrl: dataUrl,
+      filename: `kiro/multichat-answers-${stamp}.txt`  // 相对下载目录 → Downloads/kiro/
+    }).then(resp => {
+      if (!resp || !resp.success) {
+        console.error("[Multi Chat] 下载回答文件失败:", resp && resp.error);
       }
-    });
+    }).catch(err => console.error("[Multi Chat] 下载回答文件失败:", err));
   } catch (err) {
     console.error("[Multi Chat] 下载回答文件失败:", err);
   }

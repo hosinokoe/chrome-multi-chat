@@ -344,32 +344,59 @@ async function collectAnswer(platform, timeout = 90000) {
   return text;
 }
 
-// 等待生成结束：先等停止按钮出现过又消失（流式完成），再等回答文本连续稳定。
-// 兜底：即使从没检测到停止按钮，也会走文本稳定判定（有些平台停止按钮选择器抓不到）。
+// 等待生成结束：尽量确保抓到"定稿"而非流式中途的半截。
+// 判定分三阶段，任一强信号（停止按钮/文本增长）都会推翻"已结束"的判断：
+//   阶段1 等生成"开始"：轮询直到出现停止按钮 或 回答文本开始出现（最多 waitStart）。
+//           区分"还没开始生成"与"已经生成完"，避免开局就误判结束。
+//   阶段2 等停止按钮消失：出现过则等它消失（流式结束的最强信号）。
+//   阶段3 文本稳定判定：连续 STABLE_NEEDED 次(约3.5s)文本既不变化也不变长，才算定稿；
+//           期间只要停止按钮再现 或 文本变长，就重置计数（防止把生成中的停顿误判为结束）。
 async function waitForGenerationDone(platform, timeout) {
   const aa = ANSWER_ADAPTERS[platform];
   const deadline = Date.now() + timeout;
+  const POLL = 700;              // 轮询间隔
+  const STABLE_NEEDED = 5;       // 需连续稳定次数（约 3.5s）
+  const WAIT_START = 8000;       // 等待生成开始的最长时间
 
-  // 阶段1：给生成一点启动时间，若出现停止按钮则等它消失
-  await wait(500);
-  while (Date.now() < deadline && getStopButton()) {
-    await wait(400);
+  const lastText = () => {
+    const turns = aa.getTurns();
+    return turns.length ? (turns[turns.length - 1].innerText || "") : "";
+  };
+
+  // 阶段1：等生成"开始"——出现停止按钮，或回答区出现文本。最多等 WAIT_START。
+  const startDeadline = Math.min(Date.now() + WAIT_START, deadline);
+  const baseline = lastText();  // 发送瞬间可能还残留上一轮内容
+  while (Date.now() < startDeadline) {
+    if (getStopButton()) break;                 // 生成已开始
+    const cur = lastText();
+    if (cur && cur !== baseline) break;          // 新文本已出现
+    await wait(300);
   }
 
-  // 阶段2：文本稳定判定——连续 3 次(约1.2s)取到的最后一条回答文本不变，视为定稿
+  // 阶段2：若出现停止按钮，等它消失（流式结束最强信号）
+  while (Date.now() < deadline && getStopButton()) {
+    await wait(POLL);
+  }
+
+  // 阶段3：文本稳定判定——连续 STABLE_NEEDED 次不变且不变长
   let last = null;
+  let maxLen = 0;
   let stableCount = 0;
   while (Date.now() < deadline) {
-    if (getStopButton()) { stableCount = 0; await wait(400); continue; }
-    const turns = aa.getTurns();
-    const cur = turns.length ? (turns[turns.length - 1].innerText || "") : "";
-    if (cur && cur === last) {
-      if (++stableCount >= 3) return;
+    // 停止按钮再现说明又在生成，重置
+    if (getStopButton()) { stableCount = 0; await wait(POLL); continue; }
+    const cur = lastText();
+    if (cur.length > maxLen) {          // 文本还在变长 → 生成未完，重置
+      maxLen = cur.length;
+      stableCount = 0;
+      last = cur;
+    } else if (cur && cur === last) {   // 既不变也不变长
+      if (++stableCount >= STABLE_NEEDED) return;
     } else {
       stableCount = 0;
       last = cur;
     }
-    await wait(400);
+    await wait(POLL);
   }
   // 超时也返回，让 collectAnswer 用当前能抓到的内容兜底
 }

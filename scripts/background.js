@@ -76,8 +76,43 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === "downloadAnswers") {
+    // 由 service worker 发起下载。data/blob URL 会让 Chrome"无法确定文件名"而落回默认名
+    //（中文环境=「下载.txt」）并丢弃 filename 参数。解法：用 onDeterminingFilename 监听器
+    // 强制指定文件名（其返回值优先级最高，可覆盖默认命名与子目录）。
+    console.log(`[Multi Chat BG] downloadAnswers: filename=${request.filename}`);
+    pendingDownloadFilename = request.filename;   // 供 onDeterminingFilename 使用
+    chrome.downloads.download({
+      url: request.dataUrl,
+      saveAs: false,
+      conflictAction: "uniquify"
+    }, (downloadId) => {
+      if (chrome.runtime.lastError) {
+        pendingDownloadFilename = null;
+        sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      } else {
+        sendResponse({ success: true, downloadId });
+      }
+    });
+    return true;
+  }
+
   return false;
 });
+
+// 强制指定下载文件名（含 kiro/ 子目录）。仅对本扩展刚发起、待命名的那次下载生效，
+// 之后清空 pendingDownloadFilename，避免影响用户其他下载。
+let pendingDownloadFilename = null;
+if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    if (pendingDownloadFilename) {
+      suggest({ filename: pendingDownloadFilename, conflictAction: "uniquify" });
+      pendingDownloadFilename = null;
+      return true; // 异步 suggest
+    }
+    return false; // 非本扩展的下载，交回 Chrome 默认处理
+  });
+}
 
 // ============ 继续对话：直接发送 ============
 
