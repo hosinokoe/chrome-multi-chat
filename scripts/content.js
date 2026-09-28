@@ -339,9 +339,27 @@ async function collectAnswer(platform, timeout = 90000) {
 
   const turns = aa.getTurns();
   if (!turns.length) throw new Error("未找到回答内容（可能平台改版或未登录）");
-  const text = (turns[turns.length - 1].innerText || "").trim();
+  const text = cleanAnswerText(turns[turns.length - 1]);
   if (!text) throw new Error("回答内容为空");
   return text;
+}
+
+// 提取回答容器的纯文本，剥离"引用角标/装饰"元素后再取 innerText。
+// DeepSeek 等平台在正文生成完后，会异步补挂引用角标（cite）——这些角标里的 "-"、数字
+// 会进入 innerText 且陆续变化，导致"文本稳定判定"一直被打断、拖到超时抓取失败。
+// 剥掉这些装饰元素后文本更干净、更早稳定。克隆节点操作，不影响页面。
+function cleanAnswerText(el) {
+  if (!el) return "";
+  let node;
+  try {
+    node = el.cloneNode(true);
+    node.querySelectorAll(
+      '.ds-markdown-cite, sup, [class*="cite"], [class*="footnote"], svg'
+    ).forEach(n => n.remove());
+  } catch {
+    node = el; // 克隆失败兜底用原节点
+  }
+  return (node.innerText || "").trim();
 }
 
 // 等待生成结束：尽量确保抓到"定稿"而非流式中途的半截。
@@ -360,7 +378,7 @@ async function waitForGenerationDone(platform, timeout) {
 
   const lastText = () => {
     const turns = aa.getTurns();
-    return turns.length ? (turns[turns.length - 1].innerText || "") : "";
+    return turns.length ? cleanAnswerText(turns[turns.length - 1]) : "";
   };
 
   // 阶段1：等生成"开始"——出现停止按钮，或回答区出现文本。最多等 WAIT_START。
