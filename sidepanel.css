@@ -241,6 +241,33 @@ textarea:focus {
   cursor: not-allowed;
 }
 
+.action-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-secondary {
+  padding: 6px 14px;
+  background: var(--btn-secondary-bg);
+  color: var(--text-btn-secondary);
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+  background: var(--btn-secondary-hover);
+}
+
+.btn-secondary:disabled {
+  background: var(--btn-disabled);
+  cursor: not-allowed;
+}
+
 /* Targets Section */
 .targets-section {
   border-bottom: 1px solid var(--border-color);

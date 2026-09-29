@@ -273,6 +273,32 @@ const SEARCH_ADAPTERS = {
 // 已知上限：只抓最后一条、纯文本（丢失代码块语言标记/表格结构），够横向总结用；
 // 需要富格式时升级为按平台解析 markdown 容器。
 const ANSWER_ADAPTERS = {
+  chatgpt: {
+    getTurns() {
+      // ChatGPT 每条消息带 data-message-author-role；助手回答为 "assistant"，
+      // 官方稳定属性，用它区分 AI 回答与用户消息。回答正文在 .markdown 内。
+      return sel([
+        '[data-message-author-role="assistant"] .markdown',
+        '[data-message-author-role="assistant"]',
+        "div[data-message-author-role='assistant'] .prose"
+      ]);
+    }
+  },
+  tongyi: {
+    getTurns() {
+      // 通义千问(qianwen.com/tongyi.aliyun.com) class 为 hash 化的 CSS Modules，
+      // 无稳定 class；用「回答气泡」的语义多重 fallback，靠 answer/bot/markdown 关键字选。
+      // 注意排除用户提问气泡（含 questionItem/user 类）。ponytail: 选择器可能随改版失效，
+      // 失效时用调试段字数为 0 判断，据此更新此处。
+      return sel([
+        "div[class*='answerItem'] div[class*='markdown']",
+        "div[class*='answerItem']",
+        "div[class*='botText']",
+        "div[class*='tongyi-markdown']",
+        ".bubble div[class*='markdown']"
+      ]);
+    }
+  },
   gemini: {
     getTurns() {
       // Gemini 回答在 <model-response> / message-content 内
