@@ -12,8 +12,15 @@ if (window.__multiChatContentLoaded) {
 const PLATFORM_ADAPTERS = {
   chatgpt: {
     getInput() {
-      // ChatGPT 2024+ 使用 ProseMirror contenteditable div, id="prompt-textarea"
+      // ChatGPT 2024+ 登录态用 ProseMirror contenteditable div。
+      // 真机确认(2025-10)输入框已去掉 id，就是裸的 div.ProseMirror[contenteditable="true"]，
+      // 所以优先匹配 .ProseMirror；旧灰度版可能仍带 #prompt-textarea，保留兼容。
+      // contenteditable 可能是 "true" 或 "plaintext-only"，别写死其值。
+      // 未登录(/uc/)路径为 <textarea name="prompt">。
       return document.querySelector("#prompt-textarea") ||
+             document.querySelector('div.ProseMirror[contenteditable="true"]') ||
+             document.querySelector('div.ProseMirror[contenteditable="plaintext-only"]') ||
+             document.querySelector('textarea[name="prompt"]') ||
              document.querySelector('div[contenteditable="true"][data-id]') ||
              document.querySelector('textarea[data-id="root"]');
     },
@@ -648,11 +655,23 @@ function parseResetTime(text) {
   return FALLBACK;
 }
 
+// 轮询等待输入框出现并可见（SPA 渲染较慢时，注入瞬间输入框可能还不存在）。
+// 超时兜底返回当前结果（可能为 null），由上层给出"找不到输入框"提示。
+async function waitForInput(adapter, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const input = adapter.getInput();
+    if (input && (input.offsetParent !== null || input.offsetHeight > 0)) return input;
+    await wait(200);
+  }
+  return adapter.getInput();
+}
+
 async function fillAndSend(platform, message, onSent, manualSend) {
   const adapter = PLATFORM_ADAPTERS[platform];
   if (!adapter) throw new Error("不支持的平台: " + platform);
 
-  const input = adapter.getInput();
+  const input = await waitForInput(adapter, 3000);
   if (!input) throw new Error("找不到输入框，请确认页面已完全加载");
 
   // 检测额度用完/需要升级等阻止发送的提示，命中则直接停止，不浪费时间尝试

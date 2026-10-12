@@ -312,7 +312,10 @@ function setupEventListeners() {
   document.getElementById("send-btn").addEventListener("click", handlePrimaryAction);
 
   // 手动收集当前勾选平台的最新回答
-  document.getElementById("collect-btn").addEventListener("click", handleCollect);
+  document.getElementById("collect-btn").addEventListener("click", () => handleCollect(false));
+
+  // 补收失败：对比上次下载结果，只重收上次失败/未收到的平台
+  document.getElementById("collect-failed-btn").addEventListener("click", () => handleCollect(true));
 
   // Ctrl+Enter 触发
   document.getElementById("message").addEventListener("keydown", (e) => {
@@ -497,12 +500,14 @@ async function sendMessage() {
 
 // 手动收集：点「收集」按钮触发。对当前勾选平台抓取最新回答并聚合下载。
 // 与发送解耦——发送完等答案出来后随时点，不需要发送前决定收集。
-async function handleCollect() {
+// retryFailed=true：对比上次下载结果，只收集上次「失败/未收到」的平台（补收失败）。
+async function handleCollect(retryFailed) {
   const collectBtn = document.getElementById("collect-btn");
+  const failedBtn = document.getElementById("collect-failed-btn");
   const messageEl = document.getElementById("message");
 
   const checkboxes = document.querySelectorAll("#tab-list input[type='checkbox']:checked");
-  const selected = Array.from(checkboxes)
+  let selected = Array.from(checkboxes)
     .map(cb => platformList[parseInt(cb.dataset.index)])
     .filter(Boolean);
 
@@ -511,28 +516,109 @@ async function handleCollect() {
     return;
   }
 
+  let mergeInfo = null; // 补收时携带上次全文与要覆盖的文件名
+  if (retryFailed) {
+    const last = await getLastFailedKeys();
+    if (last === null) {
+      showToast("今天还没有收集记录，请先点「收集」做一次全新收集", "error");
+      return;
+    }
+    if (!last.failed.size) {
+      showToast("上次收集全部成功，无需补收", "success");
+      return;
+    }
+    selected = selected.filter(p => last.failed.has(p.key));
+    if (!selected.length) {
+      showToast("勾选的平台里没有上次失败的项", "error");
+      return;
+    }
+    mergeInfo = { prevText: last.prevText };
+  }
+
   // 收集不依赖发送，输入框可能已清空——用输入框现有内容作为问题标注，没有则占位。
   const message = messageEl.value.trim() || "（手动收集，无对应发送内容）";
 
+  const activeBtn = retryFailed ? failedBtn : collectBtn;
+  const label = retryFailed ? "补收" : "📥 收集";
   collectBtn.disabled = true;
-  const label = "📥 收集";
+  failedBtn.disabled = true;
   try {
-    const collected = await collectAnswers(selected, message, collectBtn);
-    showToast(`已收集 ${collected.count} 份回答，已下载到 Downloads/kiro`, collected.count > 0 ? "success" : "error");
+    const collected = await collectAnswers(selected, message, activeBtn, mergeInfo);
+    const where = mergeInfo ? "已追加到上次结果并存为新文件（Downloads/kiro）" : "已下载到 Downloads/kiro";
+    showToast(`已收集 ${collected.count} 份回答，${where}`, collected.count > 0 ? "success" : "error");
   } catch (err) {
     console.error("[Multi Chat] 收集失败:", err);
     showToast(`收集失败：${err.message || "未知错误"}`, "error");
   } finally {
     collectBtn.disabled = false;
-    collectBtn.textContent = label;
+    failedBtn.disabled = false;
+    activeBtn.textContent = label;
   }
+}
+
+// 读取「上次收集」的成败，判定补收目标。
+// 数据源 = 最新一次收集产出的聚合文本（与 ~/Downloads/kiro 里那份 .txt 内容一致；
+// 扩展读不了本地文件字节，所以用写文件时一并存进 storage 的同一份 text）。
+// 判定完全基于文本里的「调试信息」段：
+//   - 「时间: <ISO>」必须是今天，否则视为过期（今天首次打开保护）
+//   - 「[尝试收集]」里每行 `- 名称 (key): OK|失败|空回答` → 只有 OK 记成功，其余算失败
+// 返回:
+//   null                                  → 没有可用的今天记录（含首次打开）
+//   { failed, prevText }  → failed=需补收的 key 集合；prevText=上次全文（补收时追加于其后）
+async function getLastFailedKeys() {
+  let text;
+  try {
+    const { latestCollected } = await chrome.storage.local.get("latestCollected");
+    text = latestCollected && latestCollected.text;
+  } catch (err) {
+    console.error("[Multi Chat] 读取上次收集结果失败:", err);
+    return null;
+  }
+  if (!text) return null;
+
+  const parsed = parseCollectDebug(text);
+  if (!parsed || !parsed.time || !isSameLocalDay(parsed.time, Date.now())) return null; // 非今天 → 过期
+  return { failed: parsed.failed, prevText: text };
+}
+
+// 解析聚合文本的「调试信息」段，抽出收集时间与失败平台 key 集合。
+// 文件可能含多段（原始收集 + 若干次「补收」追加），以「最新一段」为准：
+//   - 时间取最后一个 "时间: <ISO>"（补收追加在末尾）
+//   - 每个平台以最后一次出现的状态为准（后写覆盖先写），只有 OK 记成功。
+// 返回 { time: string|null, failed: Set<key> }。
+function parseCollectDebug(text) {
+  // 最后一个时间
+  const times = [...text.matchAll(/时间:\s*(\S+)/g)];
+  const time = times.length ? times[times.length - 1][1] : null;
+
+  // 每个 key 的最后状态（按出现顺序覆盖）
+  const statusByKey = new Map();
+  const lineRe = /^-\s+.+?\(([^)]+)\):\s*(\S+)/gm;
+  let m;
+  while ((m = lineRe.exec(text)) !== null) {
+    statusByKey.set(m[1].trim(), m[2].trim());
+  }
+  const failed = new Set();
+  for (const [key, status] of statusByKey) {
+    if (status !== "OK") failed.add(key);
+  }
+  return { time: time, failed };
+}
+
+// 两个时间戳是否落在同一「本地自然日」。isoOrMs 可为 ISO 字符串或毫秒数。
+function isSameLocalDay(isoOrMs, nowMs) {
+  const a = new Date(isoOrMs);
+  const b = new Date(nowMs);
+  if (isNaN(a)) return false;
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
 // 收集勾选平台本轮回答，聚合成一份文本（含调试段）下载 + 写入 storage，供终端侧（Kiro）总结。
 // 手动触发：只对「已勾选 + 支持收集 + 已打开」的平台发起收集；其余记入调试段的[跳过收集]。
 // selected：勾选的平台对象数组。btn：收集按钮（显示进度）。
+// mergeInfo：补收时传 { prevText }——把本次结果追加到上次全文末尾，写成新文件（不覆盖原文件）；null=全新收集。
 // 返回 { count, text }：count=成功抓到的份数，text=聚合文本。
-async function collectAnswers(selected, message, btn) {
+async function collectAnswers(selected, message, btn, mergeInfo) {
   // 先把所有勾选平台分类，记录被跳过的原因（用于调试段），再挑出真正要收集的目标。
   const skipped = [];  // { platform, reason }
   const targets = [];
@@ -584,15 +670,46 @@ async function collectAnswers(selected, message, btn) {
   const answers = await Promise.all(collectTasks);
   const ok = answers.filter(a => a.success && a.answer);
 
-  const text = buildCollectedText(message, answers, skipped, selected.length);
+  // 补收：把本次结果追加到上次全文末尾（保留原内容不动），写成新文件（不覆盖原文件）。
+  // 全新收集：另起一份完整文本，存新文件。
+  const text = mergeInfo && mergeInfo.prevText
+    ? appendCollectedText(mergeInfo.prevText, answers, skipped)
+    : buildCollectedText(message, answers, skipped, selected.length);
 
   // 落地1（稳）：写入 chrome.storage.local，不受下载设置/焦点/filename 限制，一定成功。
   await persistCollected(message, text, ok.length);
 
-  // 落地2（便捷）：下载成文件到 kiro/（受浏览器下载设置影响，可能落到默认位置）
+  // 落地2（便捷）：下载成文件到 kiro/。始终新建（uniquify），不覆盖原文件。
   downloadText(text);
 
   return { count: ok.length, text: text };
+}
+
+// 补收追加：在上次全文 prevText 之后追加一段「补收」结果（原内容原样保留，不改动）。
+// answers：本次补收各平台结果。skipped：本次被跳过的平台。
+// 追加段自带时间与 [尝试收集] 明细，格式与主调试段一致，便于下次 parseCollectDebug 读取最新时间与成败。
+function appendCollectedText(prevText, answers, skipped) {
+  const okCount = answers.filter(a => a.success && a.answer).length;
+  const seg = [`\n\n\n========== 补收 ==========`];
+  for (const a of answers) {
+    const content = a.success && a.answer ? a.answer : `（未收集到：${a.error || "无回答"}）`;
+    seg.push(`\n=== ${a.platform} ===\n${content}`);
+  }
+  seg.push(`\n\n===== 调试信息 =====`);
+  seg.push(`时间: ${new Date().toISOString()}`);
+  seg.push(`本次补收: 发起 ${answers.length} · 成功 ${okCount}`);
+  if (answers.length) {
+    seg.push(`\n[尝试收集]`);
+    for (const a of answers) {
+      const status = a.success && a.answer ? "OK" : (a.success ? "空回答" : "失败");
+      seg.push(`- ${a.platform} (${a.key}): ${status} · ${a.chars} 字 · ${a.ms}ms${a.error ? ` · 错误: ${a.error}` : ""}`);
+    }
+  }
+  if (skipped && skipped.length) {
+    seg.push(`\n[跳过收集]`);
+    for (const s of skipped) seg.push(`- ${s.platform}: ${s.reason}`);
+  }
+  return prevText.replace(/\s+$/, "") + seg.join("\n");
 }
 
 // 拼装聚合文本：问题 + 各平台回答 + 末尾「调试信息」段。
@@ -624,7 +741,7 @@ function buildCollectedText(message, answers, skipped, selectedCount) {
   return parts.join("\n");
 }
 
-// 写入 chrome.storage.local（下载不可靠时的兜底，终端侧可从扩展存储读取）。
+// 写入 chrome.storage.local。text 与下载的 .txt 内容一致；「补收」靠解析其调试段判定成败。
 async function persistCollected(message, text, count) {
   try {
     await chrome.storage.local.set({
@@ -635,7 +752,7 @@ async function persistCollected(message, text, count) {
   }
 }
 
-// 把文本下载成 .txt 到下载目录的 kiro/ 子文件夹，供终端侧读取总结。
+// 把文本下载成 .txt 到下载目录的 kiro/ 子文件夹（始终新建带时间戳文件，不覆盖）。
 // 委托 background（service worker）发起下载：sidepanel 页面上下文调用
 // chrome.downloads.download 会忽略 filename（落到 Downloads 根目录、名为"下载.txt"），
 // 由 service worker 发起才能让 filename + kiro/ 子目录生效。
